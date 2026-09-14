@@ -31,6 +31,11 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Requests in-progress generation to stop. Safe to call from any thread.
+     */
+    fun stopGeneration()
+
+    /**
      * Runs a benchmark with the specified parameters.
      */
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String

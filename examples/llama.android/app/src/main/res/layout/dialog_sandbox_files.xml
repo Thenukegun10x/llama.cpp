@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/sandbox_files"
+            android:textAppearance="@style/TextAppearance.Material3.TitleLarge" />
+
+        <TextView
+            android:id="@+id/sandbox_location"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.FilledBox.ExposedDropdownMenu"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="@string/existing_files">
+
+            <AutoCompleteTextView
+                android:id="@+id/sandbox_file_picker"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="none" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/relative_file_path">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/sandbox_path"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text"
+                android:singleLine="true" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="@string/file_contents">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/sandbox_editor"
+                android:layout_width="match_parent"
+                android:layout_height="220dp"
+                android:gravity="top|start"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:maxLines="20"
+                android:scrollbars="vertical" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="end"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/read_sandbox_file"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/read" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/delete_sandbox_file"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/delete" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/save_sandbox_file"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/save" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

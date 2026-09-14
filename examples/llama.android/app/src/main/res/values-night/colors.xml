@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_primary">#A8C7FA</color>
+    <color name="brand_on_primary">#0A315E</color>
+    <color name="brand_primary_container">#174974</color>
+    <color name="brand_on_primary_container">#D4E3FF</color>
+    <color name="app_surface">#11161D</color>
+    <color name="app_surface_variant">#29313B</color>
+    <color name="app_on_surface">#E7EBF1</color>
+    <color name="app_on_surface_variant">#BEC7D3</color>
+    <color name="chat_background">#0D1218</color>
+    <color name="composer_background">#1A212A</color>
+    <color name="outline_soft">#35404D</color>
+
+    <color name="top_bar_background">#0C2D4B</color>
+    <color name="top_bar_foreground">#FFFFFF</color>
+    <color name="top_bar_secondary">#C9DDF5</color>
+
+    <color name="model_status_background">#152D47</color>
+    <color name="model_status_text">#D4E3F7</color>
+    <color name="model_status_dot">#75B7FF</color>
+    <color name="assistant_bubble">#1A222C</color>
+    <color name="assistant_bubble_text">#E7EBF1</color>
+    <color name="user_bubble">#315F9A</color>
+    <color name="user_bubble_text">#FFFFFF</color>
+
+    <color name="thinking_label">#A8C7FA</color>
+    <color name="thinking_text">#BEC7D3</color>
+    <color name="thinking_background">#14202E</color>
+</resources>

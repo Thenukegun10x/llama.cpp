@@ -1,77 +1,173 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/main"
+    android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:layout_width="match_parent">
+    android:background="@color/chat_background">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="0dp"
+        android:layout_height="60dp"
+        android:background="@color/top_bar_background"
+        android:elevation="0dp"
+        android:title="@string/app_name"
+        app:contentInsetEndWithActions="8dp"
+        app:contentInsetStartWithNavigation="8dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:navigationIconTint="@color/top_bar_foreground"
+        app:titleTextAppearance="@style/TextAppearance.AiChat.Toolbar.Title"
+        app:titleTextColor="@color/top_bar_foreground" />
 
     <LinearLayout
-        android:fitsSystemWindows="true"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:layout_marginEnd="4dp"
-        tools:context=".MainActivity">
+        android:id="@+id/model_card"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="12dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_model_status"
+        android:elevation="0dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="6dp"
+        android:paddingBottom="6dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toolbar">
 
-        <ScrollView
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
+        <View
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/bg_status_dot" />
+
+        <TextView
+            android:id="@+id/model_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
             android:layout_weight="1"
-            android:fadeScrollbars="false">
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textAppearance="@style/TextAppearance.Material3.LabelLarge"
+            android:textColor="@color/model_status_text" />
 
-            <TextView
-                android:id="@+id/gguf"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:padding="16dp"
-                android:text="Selected GGUF model's metadata will show here."
-                style="@style/TextAppearance.MaterialComponents.Body2" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/change_model"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/change"
+            android:textColor="@color/model_status_text" />
+    </LinearLayout>
 
-        </ScrollView>
+    <TextView
+        android:id="@+id/empty_state"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="48dp"
+        android:gravity="center"
+        android:lineSpacingExtra="3dp"
+        android:padding="20dp"
+        android:text="@string/empty_conversation"
+        android:textAppearance="@style/TextAppearance.Material3.BodyLarge"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        app:layout_constraintBottom_toTopOf="@id/composer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/model_card" />
 
-        <com.google.android.material.divider.MaterialDivider
-            android:layout_width="match_parent"
-            android:layout_height="2dp"
-            android:layout_marginHorizontal="16dp" />
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/messages"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:clipToPadding="false"
+        android:paddingTop="14dp"
+        android:paddingBottom="20dp"
+        android:scrollbars="vertical"
+        app:layout_constraintBottom_toTopOf="@id/composer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/model_card" />
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/messages"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="4"
-            android:fadeScrollbars="false"
-            android:scrollbars="vertical"
-            app:reverseLayout="true"
-            tools:listitem="@layout/item_message_assistant"/>
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/composer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        app:cardBackgroundColor="@color/composer_background"
+        app:cardCornerRadius="22dp"
+        app:cardElevation="2dp"
+        app:strokeColor="@color/outline_soft"
+        app:strokeWidth="1dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:gravity="bottom"
             android:orientation="horizontal"
             android:paddingStart="16dp"
-            android:paddingEnd="4dp">
+            android:paddingTop="4dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="4dp">
 
-            <EditText
-                android:id="@+id/user_input"
-                android:enabled="false"
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="match_parent"
-                android:padding="8dp"
-                style="@style/TextAppearance.MaterialComponents.Body2"
-                android:hint="Please first pick a GGUF model file to import." />
-
-            <com.google.android.material.floatingactionbutton.FloatingActionButton
-                android:id="@+id/fab"
-                android:enabled="true"
-                style="@style/Widget.Material3.FloatingActionButton.Primary"
-                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_margin="12dp"
-                android:src="@drawable/outline_folder_open_24" />
+                android:layout_weight="1"
+                app:boxBackgroundMode="none">
 
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/user_input"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@android:color/transparent"
+                    android:gravity="top"
+                    android:hint="@string/message_hint"
+                    android:inputType="textCapSentences|textMultiLine"
+                    android:maxLines="5"
+                    android:minHeight="52dp"
+                    android:paddingVertical="12dp"
+                    android:textColor="@color/app_on_surface"
+                    android:textColorHint="@color/app_on_surface_variant"
+                    android:textSize="16sp" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/mic_button"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="center_vertical"
+                android:contentDescription="@string/start_voice_input"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:padding="8dp"
+                app:icon="@drawable/outline_mic_24"
+                app:iconGravity="textStart"
+                app:iconPadding="0dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/user_action"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_marginStart="4dp"
+                android:contentDescription="@string/select_model"
+                android:minWidth="48dp"
+                android:paddingHorizontal="12dp"
+                app:icon="@drawable/outline_folder_open_24"
+                app:iconGravity="textStart"
+                app:iconPadding="0dp" />
         </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 
-    </LinearLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -16,6 +16,10 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
@@ -44,11 +48,24 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    kotlin {
+        jvmToolchain(17)
+    }
+
+    androidResources {
+        noCompress += "onnx"
+    }
+
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 dependencies {
     implementation(libs.bundles.androidx)
     implementation(libs.material)
+    implementation(files("libs/sherpa-onnx-1.13.4.aar"))
 
     implementation(project(":lib"))
 

@@ -2,15 +2,39 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginHorizontal="16dp"
-    android:layout_marginVertical="8dp"
-    android:gravity="end">
+    android:layout_marginHorizontal="14dp"
+    android:layout_marginVertical="7dp"
+    android:gravity="end"
+    android:orientation="vertical">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:text="@string/you"
+        android:textAppearance="@style/TextAppearance.Material3.LabelSmall"
+        android:textColor="@color/app_on_surface_variant"
+        android:textStyle="bold" />
 
     <TextView
         android:id="@+id/msg_content"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
         android:background="@drawable/bg_user_message"
-        android:padding="12dp"
-        android:textColor="@android:color/white" />
+        android:maxWidth="340dp"
+        android:paddingHorizontal="15dp"
+        android:paddingVertical="12dp"
+        android:textAppearance="@style/TextAppearance.AiChat.Message"
+        android:textColor="@color/user_bubble_text"
+        android:textIsSelectable="true" />
+
+    <TextView
+        android:id="@+id/msg_time"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="4dp"
+        android:textAppearance="@style/TextAppearance.Material3.LabelSmall"
+        android:textColor="@color/app_on_surface_variant" />
 </LinearLayout>

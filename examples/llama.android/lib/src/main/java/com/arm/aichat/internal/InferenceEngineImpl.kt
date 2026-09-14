@@ -276,6 +276,13 @@ internal class InferenceEngineImpl private constructor(
         }
 
     /**
+     * Requests in-progress generation to stop without unloading the model.
+     */
+    override fun stopGeneration() {
+        _cancelGeneration = true
+    }
+
+    /**
      * Unloads the model and frees resources, or reset error states
      */
     override fun cleanUp() {

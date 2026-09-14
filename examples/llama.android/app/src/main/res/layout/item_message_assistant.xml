@@ -2,15 +2,137 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginHorizontal="16dp"
-    android:layout_marginVertical="8dp"
-    android:gravity="start">
+    android:layout_marginHorizontal="14dp"
+    android:layout_marginVertical="7dp"
+    android:gravity="start"
+    android:orientation="vertical">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:text="@string/assistant"
+        android:textAppearance="@style/TextAppearance.Material3.LabelSmall"
+        android:textColor="@color/app_on_surface_variant"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:id="@+id/thinking_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/bg_thinking"
+        android:maxWidth="340dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/thinking_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="15dp"
+            android:paddingVertical="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/thinking_label"
+                android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+                android:textColor="@color/thinking_label" />
+
+            <ImageView
+                android:id="@+id/thinking_chevron"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@string/thinking_toggle"
+                android:src="@drawable/ic_chevron_up" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/thinking_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="15dp"
+            android:paddingBottom="12dp"
+            android:textAppearance="@style/TextAppearance.AiChat.Message"
+            android:textColor="@color/thinking_text" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/tooling_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/bg_thinking"
+        android:maxWidth="340dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/tooling_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="15dp"
+            android:paddingVertical="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/tooling_label"
+                android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+                android:textColor="@color/thinking_label" />
+
+            <ImageView
+                android:id="@+id/tooling_chevron"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@string/tooling_toggle"
+                android:src="@drawable/ic_chevron_up" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tooling_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="15dp"
+            android:paddingBottom="12dp"
+            android:textAppearance="@style/TextAppearance.AiChat.Message"
+            android:textColor="@color/thinking_text" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/msg_content"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
         android:background="@drawable/bg_assistant_message"
-        android:padding="12dp"
-        android:textColor="@android:color/black" />
+        android:maxWidth="340dp"
+        android:paddingHorizontal="15dp"
+        android:paddingVertical="12dp"
+        android:textAppearance="@style/TextAppearance.AiChat.Message"
+        android:textColor="@color/assistant_bubble_text"
+        android:textIsSelectable="true" />
+
+    <TextView
+        android:id="@+id/msg_time"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="4dp"
+        android:textAppearance="@style/TextAppearance.Material3.LabelSmall"
+        android:textColor="@color/app_on_surface_variant" />
 </LinearLayout>

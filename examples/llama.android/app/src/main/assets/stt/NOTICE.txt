@@ -1,0 +1,10 @@
+Bundled offline speech recognition
+
+Runtime: sherpa-onnx 1.13.4
+Source: https://github.com/k2-fsa/sherpa-onnx
+
+Model: sherpa-onnx-streaming-zipformer-en-20M-2023-02-17 (English, INT8)
+Source: https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+Original model: https://huggingface.co/desh2608/icefall-asr-librispeech-pruned-transducer-stateless7-streaming-small
+
+Speech recognition is performed locally. Recorded audio is not saved or uploaded.

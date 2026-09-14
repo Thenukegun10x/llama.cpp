@@ -1,10 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
     <style name="Base.Theme.AiChatSample" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+        <item name="colorPrimary">@color/brand_primary</item>
+        <item name="colorOnPrimary">@color/brand_on_primary</item>
+        <item name="colorPrimaryContainer">@color/brand_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/brand_on_primary_container</item>
+        <item name="colorSurface">@color/app_surface</item>
+        <item name="colorSurfaceVariant">@color/app_surface_variant</item>
+        <item name="colorOnSurface">@color/app_on_surface</item>
+        <item name="colorOnSurfaceVariant">@color/app_on_surface_variant</item>
+        <item name="android:colorAccent">@color/brand_primary</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/chat_background</item>
+        <item name="android:statusBarColor">@color/top_bar_background</item>
+        <item name="android:navigationBarColor">@color/chat_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">@bool/light_navigation_bar</item>
     </style>
 
     <style name="Theme.AiChatSample" parent="Base.Theme.AiChatSample" />
+
+    <style name="TextAppearance.AiChat.Toolbar.Title" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">@color/top_bar_foreground</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.01</item>
+    </style>
+
+    <style name="TextAppearance.AiChat.Toolbar.Subtitle" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textColor">@color/top_bar_secondary</item>
+    </style>
+
+    <style name="TextAppearance.AiChat.Message" parent="TextAppearance.Material3.BodyLarge">
+        <item name="android:textSize">16sp</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
 </resources>

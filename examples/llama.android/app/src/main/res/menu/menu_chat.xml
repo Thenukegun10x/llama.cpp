@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/action_new_chat"
+        android:icon="@drawable/outline_add_24"
+        android:title="@string/new_chat"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_history"
+        android:icon="@drawable/outline_history_24"
+        android:title="@string/conversation_history"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_select_model"
+        android:icon="@drawable/outline_folder_open_24"
+        android:title="@string/model_manager"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_sandbox_files"
+        android:icon="@drawable/outline_description_24"
+        android:title="@string/sandbox_files"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_image_gen"
+        android:icon="@drawable/outline_blur_24"
+        android:title="Image Generation"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_tool_settings"
+        android:icon="@drawable/outline_tune_24"
+        android:title="@string/tool_settings"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_unload_model"
+        android:icon="@drawable/outline_close_24"
+        android:title="@string/unload_model"
+        app:showAsAction="never" />
+</menu>

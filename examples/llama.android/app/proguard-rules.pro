@@ -23,6 +23,12 @@
 -keep class com.arm.aichat.* { *; }
 -keep class com.arm.aichat.gguf.* { *; }
 
+# sherpa-onnx resolves these Kotlin API classes and constructors directly from JNI.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}
+
 -assumenosideeffects class android.util.Log {
     public static int v(...);
     public static int d(...);

@@ -3,11 +3,14 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
+val vulkanToolchainFile = File(rootDir.parentFile.parentFile.parentFile, "build-toolchain/host-toolchain.cmake")
+val vulkanSdkDir = System.getenv("VULKAN_SDK")
+
 android {
     namespace = "com.arm.aichat"
     compileSdk = 36
 
-    ndkVersion = "29.0.13113456"
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         minSdk = 33
@@ -16,7 +19,7 @@ android {
         consumerProguardFiles("consumer-rules.pro")
 
         ndk {
-             abiFilters += listOf("arm64-v8a", "x86_64")
+             abiFilters += listOf("arm64-v8a")
         }
         externalNativeBuild {
             cmake {
@@ -33,6 +36,12 @@ android {
                 arguments += "-DGGML_BACKEND_DL=ON"
                 arguments += "-DGGML_CPU_ALL_VARIANTS=ON"
                 arguments += "-DGGML_LLAMAFILE=OFF"
+
+                if (vulkanToolchainFile.exists() && vulkanSdkDir != null) {
+                    arguments += "-DGGML_VULKAN=ON"
+                    arguments += "-DGGML_VULKAN_SHADERS_GEN_TOOLCHAIN=${vulkanToolchainFile.absolutePath}"
+                    arguments += "-DSPIRV-Headers_DIR=$vulkanSdkDir/Lib/cmake/SPIRV-Headers"
+                }
             }
         }
         aarMetadata {
@@ -42,7 +51,7 @@ android {
     externalNativeBuild {
         cmake {
             path("src/main/cpp/CMakeLists.txt")
-            version = "3.31.6"
+            version = "4.3.3"
         }
     }
     compileOptions {
