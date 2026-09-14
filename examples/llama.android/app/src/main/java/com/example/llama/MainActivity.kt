@@ -11,6 +11,7 @@ import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.ImageView
 import android.widget.ProgressBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -67,11 +68,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var userActionBtn: MaterialButton
     private lateinit var micButton: MaterialButton
     private lateinit var changeModelBtn: MaterialButton
+    private lateinit var ctxTracker: View
+    private lateinit var ctxUsageTv: TextView
+    private lateinit var ctxBar: ProgressBar
     private lateinit var chatStore: ConversationStore
     private lateinit var sandboxTools: SandboxFileTools
     private lateinit var modelRepository: HuggingFaceModelRepository
     private lateinit var speechRecognizer: OnDeviceSpeechRecognizer
     private lateinit var toolSettings: ToolSettings
+    private lateinit var inferenceSettings: InferenceSettings
     private var imageGenEngine: ImageGenEngine? = null
     private var imageGenTool: ImageGenTool? = null
 
@@ -107,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         modelRepository = HuggingFaceModelRepository(applicationContext)
         speechRecognizer = OnDeviceSpeechRecognizer(applicationContext)
         toolSettings = ToolSettings(applicationContext)
+        inferenceSettings = InferenceSettings(applicationContext)
         initImageGenEngine()
         toolbar = findViewById(R.id.toolbar)
         modelStatusTv = findViewById(R.id.model_status)
@@ -116,6 +122,9 @@ class MainActivity : AppCompatActivity() {
         userActionBtn = findViewById(R.id.user_action)
         micButton = findViewById(R.id.mic_button)
         changeModelBtn = findViewById(R.id.change_model)
+        ctxTracker = findViewById(R.id.ctx_tracker)
+        ctxUsageTv = findViewById(R.id.ctx_usage)
+        ctxBar = findViewById(R.id.ctx_bar)
 
         messagesRv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         messagesRv.adapter = messageAdapter
@@ -178,6 +187,10 @@ class MainActivity : AppCompatActivity() {
                     showToolSettings()
                     true
                 }
+                R.id.action_inference_settings -> {
+                    showInferenceSettings()
+                    true
+                }
                 R.id.action_unload_model -> {
                     unloadAllModels()
                     true
@@ -206,7 +219,6 @@ class MainActivity : AppCompatActivity() {
                 engine = initializedEngine
                 engineReady = true
                 refreshUi()
-                restoreLastModel()
             } catch (exception: Exception) {
                 Log.e(TAG, "Unable to initialize inference engine", exception)
                 showToast(getString(R.string.engine_start_failed))
@@ -305,6 +317,88 @@ class MainActivity : AppCompatActivity() {
             toolSettings.allToolsEnabled = allToggle.isChecked
             toolSettings.sandboxToolsEnabled = sandboxToggle.isChecked
             toolSettings.imageGenEnabled = imageGenToggle.isChecked
+        }
+
+        dialog.setContentView(content)
+        dialog.show()
+    }
+
+    private fun showInferenceSettings() {
+        val dialog = BottomSheetDialog(this)
+        val content = layoutInflater.inflate(R.layout.dialog_inference_settings, null)
+        val ctxSpinner = content.findViewById<Spinner>(R.id.setting_context_size)
+        val kvSpinner = content.findViewById<Spinner>(R.id.setting_kv_cache)
+        val tempSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_temperature)
+        val topPSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_p)
+        val topKSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_k)
+        val repeatSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_repeat_penalty)
+        val maxTokensSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_max_tokens)
+        val tempLabel = content.findViewById<TextView>(R.id.setting_temp_label)
+        val topPLabel = content.findViewById<TextView>(R.id.setting_top_p_label)
+        val topKLabel = content.findViewById<TextView>(R.id.setting_top_k_label)
+        val repeatLabel = content.findViewById<TextView>(R.id.setting_repeat_label)
+        val maxTokensLabel = content.findViewById<TextView>(R.id.setting_max_tokens_label)
+
+        val prevCtx = inferenceSettings.contextSize
+        val prevKv = inferenceSettings.kvCacheType
+
+        ctxSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            InferenceSettings.CONTEXT_OPTIONS.map { it.toString() }
+        )
+        ctxSpinner.setSelection(
+            InferenceSettings.CONTEXT_OPTIONS.indexOf(prevCtx).takeIf { it >= 0 } ?: 1
+        )
+        kvSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            InferenceSettings.KV_LABELS.toList()
+        )
+        kvSpinner.setSelection(prevKv.coerceIn(0, InferenceSettings.KV_LABELS.size - 1))
+
+        fun refreshLabels() {
+            tempLabel.text = getString(R.string.setting_temperature, tempSlider.value)
+            topPLabel.text = getString(R.string.setting_top_p, topPSlider.value)
+            topKLabel.text = getString(R.string.setting_top_k, topKSlider.value.toInt())
+            repeatLabel.text = getString(R.string.setting_repeat_penalty, repeatSlider.value)
+            maxTokensLabel.text = getString(R.string.setting_max_tokens, maxTokensSlider.value.toInt())
+        }
+        tempSlider.value = inferenceSettings.temperature
+        topPSlider.value = inferenceSettings.topP
+        topKSlider.value = inferenceSettings.topK.toFloat()
+        repeatSlider.value = inferenceSettings.repeatPenalty
+        maxTokensSlider.value = inferenceSettings.maxTokens.toFloat()
+        refreshLabels()
+
+        val listener = com.google.android.material.slider.Slider.OnChangeListener { _, _, _ -> refreshLabels() }
+        tempSlider.addOnChangeListener(listener)
+        topPSlider.addOnChangeListener(listener)
+        topKSlider.addOnChangeListener(listener)
+        repeatSlider.addOnChangeListener(listener)
+        maxTokensSlider.addOnChangeListener(listener)
+
+        dialog.setOnDismissListener {
+            inferenceSettings.contextSize =
+                InferenceSettings.CONTEXT_OPTIONS[ctxSpinner.selectedItemPosition]
+            inferenceSettings.kvCacheType = kvSpinner.selectedItemPosition
+            inferenceSettings.temperature = tempSlider.value
+            inferenceSettings.topP = topPSlider.value
+            inferenceSettings.topK = topKSlider.value.toInt()
+            inferenceSettings.repeatPenalty = repeatSlider.value
+            inferenceSettings.maxTokens = maxTokensSlider.value.toInt()
+            lifecycleScope.launch {
+                runCatching {
+                    engine?.updateSampling(
+                        inferenceSettings.temperature,
+                        inferenceSettings.topK,
+                        inferenceSettings.topP,
+                        inferenceSettings.repeatPenalty
+                    )
+                }
+                if (isModelReady && (inferenceSettings.contextSize != prevCtx ||
+                        inferenceSettings.kvCacheType != prevKv)) {
+                    showToast(getString(R.string.reload_model_to_apply))
+                }
+            }
         }
 
         dialog.setContentView(content)
@@ -468,14 +562,6 @@ class MainActivity : AppCompatActivity() {
         selectConversation(selectedConversation, saveSelection = false)
     }
 
-    private fun restoreLastModel() {
-        val modelName = chatStore.lastModelName() ?: return
-        val modelFile = File(ensureModelsDirectory(), modelName)
-        if (modelFile.exists()) {
-            lifecycleScope.launch { loadModel(modelName, modelFile) }
-        }
-    }
-
     private val getContent = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { handleSelectedModel(it) }
     }
@@ -552,6 +638,13 @@ class MainActivity : AppCompatActivity() {
                 if (inferenceEngine.state.value.isModelLoaded) {
                     inferenceEngine.cleanUp()
                 }
+                inferenceEngine.configure(inferenceSettings.contextSize, inferenceSettings.kvCacheType)
+                inferenceEngine.updateSampling(
+                    inferenceSettings.temperature,
+                    inferenceSettings.topK,
+                    inferenceSettings.topP,
+                    inferenceSettings.repeatPenalty
+                )
                 inferenceEngine.loadModel(modelFile.path)
                 inferenceEngine.setSystemPrompt(buildSystemPrompt())
             }
@@ -559,6 +652,7 @@ class MainActivity : AppCompatActivity() {
             chatStore.saveLastModelName(modelName)
             isModelReady = true
             refreshUi()
+            updateCtxTracker()
         } catch (exception: Exception) {
             Log.e(TAG, "Unable to load model", exception)
             selectedModelName = null
@@ -695,11 +789,13 @@ class MainActivity : AppCompatActivity() {
             try {
                 var nextPrompt = userMessage
                 var toolCallCount = 0
+                var streamedTokens = 0
                 while (true) {
                     val generatedResponse = StringBuilder()
-                    inferenceEngine.sendUserPrompt(nextPrompt).collect { token ->
+                    inferenceEngine.sendUserPrompt(nextPrompt, inferenceSettings.maxTokens).collect { token ->
                         generatedResponse.append(token)
                         producedOutput = true
+                        if (++streamedTokens % 8 == 0) updateCtxTracker()
                         withContext(Dispatchers.Main) {
                             val split = splitResponse(generatedResponse.toString())
                             updateLastAssistantMessage(split.answer, split.thinking, split.tooling)
@@ -726,6 +822,7 @@ class MainActivity : AppCompatActivity() {
                 failure = exception
                 Log.e(TAG, "Generation failed", exception)
             } finally {
+                updateCtxTracker()
                 withContext(NonCancellable + Dispatchers.Main) {
                     if (!producedOutput) {
                         updateLastAssistantMessage(
@@ -1147,12 +1244,31 @@ class MainActivity : AppCompatActivity() {
         changeModelBtn.isEnabled = false
     }
 
+    private fun updateCtxTracker() {
+        val inferenceEngine = engine ?: return
+        lifecycleScope.launch(Dispatchers.Default) {
+            val usage = runCatching { inferenceEngine.contextUsage() }.getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) { renderCtxTracker(usage.first, usage.second) }
+        }
+    }
+
+    private fun renderCtxTracker(used: Int, total: Int) {
+        if (!isModelReady || total <= 0) return
+        ctxUsageTv.text = getString(R.string.context_usage, used.coerceAtLeast(0), total)
+        ctxBar.progress = ((used.coerceAtLeast(0) * 100L) / total).toInt().coerceIn(0, 100)
+        ctxUsageTv.setTextColor(
+            if (used * 100L / total >= 90) getColor(android.R.color.holo_red_dark)
+            else getColor(R.color.model_status_text)
+        )
+    }
+
     private fun refreshUi() {
         modelStatusTv.text = when {
             !engineReady -> getString(R.string.engine_starting)
             isModelReady -> getString(R.string.model_ready, selectedModelName ?: "")
             else -> getString(R.string.no_model_selected)
         }
+        ctxTracker.visibility = if (isModelReady) View.VISIBLE else View.GONE
         val generationActive = generationJob?.isActive == true
         userInputEt.isEnabled = engineReady && !generationActive && !isGenerating
         changeModelBtn.isEnabled = engineReady && generationJob?.isActive != true

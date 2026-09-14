@@ -39,6 +39,12 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_inference_settings"
+        android:icon="@drawable/outline_tune_24"
+        android:title="@string/inference_settings"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_unload_model"
         android:icon="@drawable/outline_close_24"
         android:title="@string/unload_model"

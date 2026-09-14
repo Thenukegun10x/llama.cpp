@@ -73,6 +73,17 @@
     <string name="stt_no_speech">No speech was detected.</string>
     <string name="microphone_permission_required">Microphone permission is required for voice input.</string>
     <string name="tool_settings">Tool settings</string>
+    <string name="inference_settings">Inference settings</string>
+    <string name="setting_context_size">Context size (tokens)</string>
+    <string name="setting_kv_cache">KV cache type</string>
+    <string name="setting_reload_note">Context size and KV cache apply when a model is loaded.</string>
+    <string name="setting_temperature">Temperature: %1$.2f</string>
+    <string name="setting_top_p">Top-p: %1$.2f</string>
+    <string name="setting_top_k">Top-k: %1$d</string>
+    <string name="setting_repeat_penalty">Repeat penalty: %1$.2f</string>
+    <string name="setting_max_tokens">Max response tokens: %1$d</string>
+    <string name="context_usage">Context %1$d / %2$d</string>
+    <string name="reload_model_to_apply">Reload the model to apply context / KV changes.</string>
     <string name="all_tools">Enable all tools</string>
     <string name="tool_sandbox_files">Sandbox file tools</string>
     <string name="tool_image_gen">Image generation</string>

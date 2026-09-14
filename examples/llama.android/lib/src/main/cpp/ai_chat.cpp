@@ -28,10 +28,20 @@ constexpr int   N_THREADS_MIN           = 2;
 constexpr int   N_THREADS_MAX           = 4;
 constexpr int   N_THREADS_HEADROOM      = 2;
 
-constexpr int   DEFAULT_CONTEXT_SIZE    = 8192;
+constexpr int   DEFAULT_CONTEXT_SIZE    = 4096;
 constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
 constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
+
+// Runtime-tunable config, set from the app via configure()/updateSampling().
+// Context size and KV types apply on the next model load; sampling applies live.
+static int            g_n_ctx           = DEFAULT_CONTEXT_SIZE;
+static enum ggml_type g_type_k          = GGML_TYPE_F16;
+static enum ggml_type g_type_v          = GGML_TYPE_F16;
+static float          g_temp            = DEFAULT_SAMPLER_TEMP;
+static int            g_top_k           = 40;
+static float          g_top_p           = 0.95f;
+static float          g_penalty_repeat  = 1.0f;
 
 static llama_model                      * g_model;
 static llama_context                    * g_context;
@@ -73,11 +83,13 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstr
     return 0;
 }
 
-static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT_CONTEXT_SIZE) {
+static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
     if (!model) {
         LOGe("%s: model cannot be null", __func__);
         return nullptr;
     }
+
+    const int ctx = n_ctx > 0 ? n_ctx : g_n_ctx;
 
     // Multi-threading setup
     const int n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
@@ -88,15 +100,17 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
     const int trained_context_size = llama_model_n_ctx_train(model);
-    if (n_ctx > trained_context_size) {
+    if (ctx > trained_context_size) {
         LOGw("%s: Model was trained with only %d context size! Enforcing %d context size...",
-             __func__, trained_context_size, n_ctx);
+             __func__, trained_context_size, ctx);
     }
-    ctx_params.n_ctx = n_ctx;
+    ctx_params.n_ctx = ctx;
     ctx_params.n_batch = BATCH_SIZE;
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+    ctx_params.type_k = g_type_k;
+    ctx_params.type_v = g_type_v;
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
@@ -104,10 +118,46 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     return context;
 }
 
-static common_sampler *new_sampler(float temp) {
+static common_sampler *new_sampler() {
     common_params_sampling sparams;
-    sparams.temp = temp;
+    sparams.temp           = g_temp;
+    sparams.top_k          = g_top_k;
+    sparams.top_p          = g_top_p;
+    sparams.penalty_repeat = g_penalty_repeat;
     return common_sampler_init(g_model, sparams);
+}
+
+// Applies context size + KV cache type on the next model load.
+// kv_type: 0 = F16, 1 = Q8_0, 2 = Q4_0.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeConfigure(JNIEnv * /*env*/, jobject /*unused*/,
+        jint n_ctx, jint kv_type) {
+    g_n_ctx = n_ctx > 0 ? n_ctx : DEFAULT_CONTEXT_SIZE;
+    enum ggml_type kv = GGML_TYPE_F16;
+    if (kv_type == 1) {
+        kv = GGML_TYPE_Q8_0;
+    } else if (kv_type == 2) {
+        kv = GGML_TYPE_Q4_0;
+    }
+    g_type_k = kv;
+    g_type_v = kv;
+    LOGi("%s: n_ctx=%d kv=%d", __func__, g_n_ctx, (int) kv_type);
+}
+
+// Updates sampling live; takes effect on the next prompt when idle.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeUpdateSampling(JNIEnv * /*env*/, jobject /*unused*/,
+        jfloat temp, jint top_k, jfloat top_p, jfloat penalty_repeat) {
+    g_temp           = temp;
+    g_top_k          = top_k;
+    g_top_p          = top_p;
+    g_penalty_repeat = penalty_repeat;
+    if (g_model != nullptr && g_sampler != nullptr) {
+        common_sampler_free(g_sampler);
+        g_sampler = new_sampler();
+    }
 }
 
 extern "C"
@@ -118,7 +168,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobje
     g_context = context;
     g_batch = llama_batch_init(BATCH_SIZE, 0, 1);
     g_chat_templates = common_chat_templates_init(g_model, "");
-    g_sampler = new_sampler(DEFAULT_SAMPLER_TEMP);
+    g_sampler = new_sampler();
     return 0;
 }
 
@@ -313,6 +363,18 @@ static void reset_short_term_states() {
     assistant_ss.str("");
 }
 
+// Returns int[2] = {tokens currently in context, context size}.
+extern "C"
+JNIEXPORT jintArray JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeContextUsage(JNIEnv *env, jobject /*unused*/) {
+    const jint vals[2] = {(jint) current_position, (jint) g_n_ctx};
+    jintArray out = env->NewIntArray(2);
+    if (out != nullptr) {
+        env->SetIntArrayRegion(out, 0, 2, vals);
+    }
+    return out;
+}
+
 static int decode_tokens_in_batches(
         llama_context *context,
         llama_batch &batch,
@@ -327,7 +389,7 @@ static int decode_tokens_in_batches(
         LOGv("%s: Preparing a batch size of %d starting at: %d", __func__, cur_batch_size, i);
 
         // Shift context if current batch cannot fit into the context
-        if (start_pos + i + cur_batch_size >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
+        if (start_pos + i + cur_batch_size >= g_n_ctx - OVERFLOW_HEADROOM) {
             LOGw("%s: Current batch won't fit into context! Shifting...", __func__);
             shift_context();
         }
@@ -381,7 +443,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     }
 
     // Handle context overflow
-    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
+    const int max_batch_size = g_n_ctx - OVERFLOW_HEADROOM;
     if ((int) system_tokens.size() > max_batch_size) {
         LOGe("%s: System prompt too long for context! %d tokens, max: %d",
              __func__, (int) system_tokens.size(), max_batch_size);
@@ -430,7 +492,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
 
     // Ensure user prompt doesn't exceed the context size by truncating if necessary.
     const int user_prompt_size = (int) user_tokens.size();
-    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
+    const int max_batch_size = g_n_ctx - OVERFLOW_HEADROOM;
     if (user_prompt_size > max_batch_size) {
         const int skipped_tokens = user_prompt_size - max_batch_size;
         user_tokens.resize(max_batch_size);
@@ -490,7 +552,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         jobject /*unused*/
 ) {
     // Infinite text generation via context shifting
-    if (current_position >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
+    if (current_position >= g_n_ctx - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
         shift_context();
     }
@@ -552,10 +614,13 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
 
     // Free up resources
     common_sampler_free(g_sampler);
+    g_sampler = nullptr;
     g_chat_templates.reset();
     llama_batch_free(g_batch);
     llama_free(g_context);
+    g_context = nullptr;
     llama_model_free(g_model);
+    g_model = nullptr;
 }
 
 extern "C"

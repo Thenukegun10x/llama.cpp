@@ -21,6 +21,24 @@ interface InferenceEngine {
     suspend fun loadModel(pathToModel: String)
 
     /**
+     * Set context size and KV cache type. Applies on the next [loadModel] call.
+     *
+     * @param nCtx context size in tokens (e.g. 2048, 4096, 8192)
+     * @param kvCacheType 0 = F16, 1 = Q8_0, 2 = Q4_0
+     */
+    suspend fun configure(nCtx: Int, kvCacheType: Int)
+
+    /**
+     * Update sampling params. Applies live when the engine is idle.
+     */
+    suspend fun updateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float)
+
+    /**
+     * Tokens currently held in context and the context size.
+     */
+    suspend fun contextUsage(): Pair<Int, Int>
+
+    /**
      * Sends a system prompt to the loaded model
      */
     suspend fun setSystemPrompt(systemPrompt: String)

@@ -86,6 +86,15 @@ internal class InferenceEngineImpl private constructor(
     private external fun load(modelPath: String): Int
 
     @FastNative
+    private external fun nativeConfigure(nCtx: Int, kvType: Int)
+
+    @FastNative
+    private external fun nativeUpdateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float)
+
+    @FastNative
+    private external fun nativeContextUsage(): IntArray
+
+    @FastNative
     private external fun prepare(): Int
 
     @FastNative
@@ -147,6 +156,22 @@ internal class InferenceEngineImpl private constructor(
     /**
      * Load the LLM
      */
+    override suspend fun configure(nCtx: Int, kvCacheType: Int) =
+        withContext(llamaDispatcher) {
+            nativeConfigure(nCtx, kvCacheType)
+        }
+
+    override suspend fun updateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float) =
+        withContext(llamaDispatcher) {
+            nativeUpdateSampling(temp, topK, topP, penaltyRepeat)
+        }
+
+    override suspend fun contextUsage(): Pair<Int, Int> =
+        withContext(llamaDispatcher) {
+            val vals = nativeContextUsage()
+            Pair(vals.getOrElse(0) { 0 }, vals.getOrElse(1) { 0 })
+        }
+
     override suspend fun loadModel(pathToModel: String) =
         withContext(llamaDispatcher) {
             check(_state.value is InferenceEngine.State.Initialized) {
