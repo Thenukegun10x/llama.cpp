@@ -28,6 +28,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.ParsedResponse
 import com.arm.aichat.gguf.GgufMetadata
 import com.arm.aichat.isModelLoaded
 import com.google.android.material.appbar.MaterialToolbar
@@ -37,6 +38,7 @@ import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import android.view.ViewGroup
+import org.json.JSONObject
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -94,6 +96,7 @@ class MainActivity : AppCompatActivity() {
     private var modelDownloadJob: Job? = null
     private var repositoryIndexJob: Job? = null
     private var speechJob: Job? = null
+    private var nativeToolsSupported = false
 
     private val requestMicrophonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -242,6 +245,12 @@ class MainActivity : AppCompatActivity() {
             return parts.joinToString("\n")
         }
 
+        // When the loaded model has a native tool-aware chat template, Jinja injects
+        // the tools section and calling instructions in the model's exact native format.
+        if (nativeToolsSupported) {
+            return parts.joinToString("\n")
+        }
+
         val toolDescs = mutableListOf<String>()
         if (toolSettings.sandboxToolsEnabled) {
             toolDescs.add("FILE TOOLS (paths are relative to the private sandbox):")
@@ -303,6 +312,14 @@ class MainActivity : AppCompatActivity() {
             toolSettings.allToolsEnabled = allToggle.isChecked
             toolSettings.sandboxToolsEnabled = sandboxToggle.isChecked
             toolSettings.webToolsEnabled = webToggle.isChecked
+            lifecycleScope.launch {
+                val inferenceEngine = engine ?: return@launch
+                withContext(Dispatchers.IO) {
+                    inferenceEngine.setTools(ToolDefinitions.buildToolsJson(toolSettings))
+                    nativeToolsSupported = inferenceEngine.hasNativeToolSupport()
+                    inferenceEngine.setSystemPrompt(buildSystemPrompt())
+                }
+            }
         }
 
         dialog.setContentView(content)
@@ -314,6 +331,7 @@ class MainActivity : AppCompatActivity() {
         val content = layoutInflater.inflate(R.layout.dialog_inference_settings, null)
         val ctxSpinner = content.findViewById<Spinner>(R.id.setting_context_size)
         val kvSpinner = content.findViewById<Spinner>(R.id.setting_kv_cache)
+        val threadsSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_threads)
         val tempSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_temperature)
         val topPSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_p)
         val topKSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_k)
@@ -324,9 +342,11 @@ class MainActivity : AppCompatActivity() {
         val topKLabel = content.findViewById<TextView>(R.id.setting_top_k_label)
         val repeatLabel = content.findViewById<TextView>(R.id.setting_repeat_label)
         val maxTokensLabel = content.findViewById<TextView>(R.id.setting_max_tokens_label)
+        val threadsLabel = content.findViewById<TextView>(R.id.setting_threads_label)
 
         val prevCtx = inferenceSettings.contextSize
         val prevKv = inferenceSettings.kvCacheType
+        val prevThreads = inferenceSettings.threads
 
         ctxSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -340,6 +360,7 @@ class MainActivity : AppCompatActivity() {
             InferenceSettings.KV_LABELS.toList()
         )
         kvSpinner.setSelection(prevKv.coerceIn(0, InferenceSettings.KV_LABELS.size - 1))
+        threadsSlider.valueTo = InferenceSettings.MAX_THREADS.toFloat()
 
         fun refreshLabels() {
             tempLabel.text = getString(R.string.setting_temperature, tempSlider.value)
@@ -347,12 +368,14 @@ class MainActivity : AppCompatActivity() {
             topKLabel.text = getString(R.string.setting_top_k, topKSlider.value.toInt())
             repeatLabel.text = getString(R.string.setting_repeat_penalty, repeatSlider.value)
             maxTokensLabel.text = getString(R.string.setting_max_tokens, maxTokensSlider.value.toInt())
+            threadsLabel.text = getString(R.string.setting_threads, threadsSlider.value.toInt())
         }
         tempSlider.value = inferenceSettings.temperature
         topPSlider.value = inferenceSettings.topP
         topKSlider.value = inferenceSettings.topK.toFloat()
         repeatSlider.value = inferenceSettings.repeatPenalty
         maxTokensSlider.value = inferenceSettings.maxTokens.toFloat()
+        threadsSlider.value = prevThreads.toFloat().coerceIn(1f, InferenceSettings.MAX_THREADS.toFloat())
         refreshLabels()
 
         val listener = com.google.android.material.slider.Slider.OnChangeListener { _, _, _ -> refreshLabels() }
@@ -361,11 +384,13 @@ class MainActivity : AppCompatActivity() {
         topKSlider.addOnChangeListener(listener)
         repeatSlider.addOnChangeListener(listener)
         maxTokensSlider.addOnChangeListener(listener)
+        threadsSlider.addOnChangeListener(listener)
 
         dialog.setOnDismissListener {
             inferenceSettings.contextSize =
                 InferenceSettings.CONTEXT_OPTIONS[ctxSpinner.selectedItemPosition]
             inferenceSettings.kvCacheType = kvSpinner.selectedItemPosition
+            inferenceSettings.threads = threadsSlider.value.toInt()
             inferenceSettings.temperature = tempSlider.value
             inferenceSettings.topP = topPSlider.value
             inferenceSettings.topK = topKSlider.value.toInt()
@@ -381,7 +406,8 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
                 if (isModelReady && (inferenceSettings.contextSize != prevCtx ||
-                        inferenceSettings.kvCacheType != prevKv)) {
+                        inferenceSettings.kvCacheType != prevKv ||
+                        inferenceSettings.threads != prevThreads)) {
                     showToast(getString(R.string.reload_model_to_apply))
                 }
             }
@@ -470,7 +496,11 @@ class MainActivity : AppCompatActivity() {
                 if (inferenceEngine.state.value.isModelLoaded) {
                     inferenceEngine.cleanUp()
                 }
-                inferenceEngine.configure(inferenceSettings.contextSize, inferenceSettings.kvCacheType)
+                inferenceEngine.configure(
+                    inferenceSettings.contextSize,
+                    inferenceSettings.kvCacheType,
+                    inferenceSettings.threads
+                )
                 inferenceEngine.updateSampling(
                     inferenceSettings.temperature,
                     inferenceSettings.topK,
@@ -478,6 +508,9 @@ class MainActivity : AppCompatActivity() {
                     inferenceSettings.repeatPenalty
                 )
                 inferenceEngine.loadModel(modelFile.path)
+                inferenceEngine.setTools(ToolDefinitions.buildToolsJson(toolSettings))
+                nativeToolsSupported = inferenceEngine.hasNativeToolSupport()
+                Log.i(TAG, "Model loaded: nativeToolsSupported=$nativeToolsSupported")
                 inferenceEngine.setSystemPrompt(buildSystemPrompt())
             }
             selectedModelName = modelName
@@ -602,13 +635,36 @@ class MainActivity : AppCompatActivity() {
             var failure: Throwable? = null
             var producedOutput = false
             try {
-                var nextPrompt = userMessage
                 var toolCallCount = 0
                 var streamedTokens = 0
+                var isFirstTurn = true
+                var lastToolCall: ToolCall? = null
+                var lastToolResult: String = ""
+
                 while (true) {
                     val generatedResponse = StringBuilder()
                     var turnEmittedTokens = 0
-                    inferenceEngine.sendUserPrompt(nextPrompt, inferenceSettings.maxTokens).collect { token ->
+
+                    val tokenFlow = if (isFirstTurn || !nativeToolsSupported || lastToolCall == null) {
+                        inferenceEngine.sendUserPrompt(
+                            if (isFirstTurn) userMessage else toolResultPrompt(lastToolCall!!, lastToolResult),
+                            inferenceSettings.maxTokens
+                        )
+                    } else {
+                        val toolName = when (val completedCall = requireNotNull(lastToolCall)) {
+                            is ToolCall.Sandbox -> completedCall.call.name
+                            is ToolCall.WebSearch -> completedCall.call.action
+                        }
+                        inferenceEngine.sendToolResponse(
+                            toolName,
+                            "",
+                            lastToolResult.ifEmpty { "(no output)" },
+                            inferenceSettings.maxTokens
+                        )
+                    }
+                    isFirstTurn = false
+
+                    tokenFlow.collect { token ->
                         generatedResponse.append(token)
                         producedOutput = true
                         turnEmittedTokens++
@@ -621,7 +677,21 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    val toolCall = parseAnyToolCall(generatedResponse.toString())
+                    val rawResp = generatedResponse.toString()
+                    val parsed = inferenceEngine.parseResponse(rawResp, isPartial = false)
+                    val toolCall = parseFromNative(parsed) ?: parseAnyToolCall(rawResp)
+
+                    withContext(Dispatchers.Main) {
+                        if (parsed.hasParser && (parsed.content.isNotBlank() || parsed.thinking.isNotBlank())) {
+                            val tooling = if (toolCall != null) {
+                                extractAnyToolJson(rawResp)
+                                    ?: parsed.toolCalls.firstOrNull()?.let { "${it.name}(${it.arguments})" }
+                                    ?: ""
+                            } else ""
+                            updateLastAssistantMessage(parsed.content.trim(), parsed.thinking.trim(), tooling)
+                        }
+                    }
+
                     if (toolCall == null) {
                         if (turnEmittedTokens == 0 && toolCallCount > 0) {
                             withContext(Dispatchers.Main) {
@@ -634,12 +704,13 @@ class MainActivity : AppCompatActivity() {
 
                     val toolResult = withContext(Dispatchers.IO) { executeToolCall(toolCall) }
                     toolCallCount++
+                    lastToolCall = toolCall
+                    lastToolResult = toolResult
                     withContext(Dispatchers.Main) {
                         appendMessage(
                             Message(UUID.randomUUID().toString(), getString(R.string.thinking), false)
                         )
                     }
-                    nextPrompt = toolResultPrompt(toolCall, toolResult)
                 }
             } catch (exception: CancellationException) {
                 throw exception
@@ -759,6 +830,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
         chatStore.saveConversations(conversations, activeConversationId)
+    }
+
+    private fun parseFromNative(parsed: ParsedResponse): ToolCall? {
+        if (!toolSettings.allToolsEnabled || !parsed.hasParser) return null
+        val nativeCall = parsed.toolCalls.firstOrNull() ?: return null
+        val arguments = runCatching {
+            if (nativeCall.arguments.isBlank()) JSONObject() else JSONObject(nativeCall.arguments)
+        }.getOrDefault(JSONObject())
+        arguments.put("name", nativeCall.name)
+        if (toolSettings.sandboxToolsEnabled) {
+            sandboxTools.parseToolCall(arguments)?.let { return ToolCall.Sandbox(it) }
+        }
+        if (toolSettings.webToolsEnabled) {
+            webSearchTools.parseToolCall(arguments)?.let { return ToolCall.WebSearch(it) }
+        }
+        return null
     }
 
     private fun parseAnyToolCall(response: String): ToolCall? {

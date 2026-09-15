@@ -3,9 +3,12 @@ package com.arm.aichat.internal
 import android.content.Context
 import android.util.Log
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.ParsedResponse
+import com.arm.aichat.ToolCallInfo
 import com.arm.aichat.UnsupportedArchitectureException
 import com.arm.aichat.internal.InferenceEngineImpl.Companion.getInstance
 import dalvik.annotation.optimization.FastNative
+import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,7 +89,7 @@ internal class InferenceEngineImpl private constructor(
     private external fun load(modelPath: String): Int
 
     @FastNative
-    private external fun nativeConfigure(nCtx: Int, kvType: Int)
+    private external fun nativeConfigure(nCtx: Int, kvType: Int, nThreads: Int)
 
     @FastNative
     private external fun nativeUpdateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float)
@@ -117,6 +120,18 @@ internal class InferenceEngineImpl private constructor(
 
     @FastNative
     private external fun shutdown()
+
+    @FastNative
+    private external fun nativeSetTools(toolsJson: String)
+
+    @FastNative
+    private external fun nativeHasToolSupport(): Boolean
+
+    @FastNative
+    private external fun nativeParseResponse(rawText: String, isPartial: Boolean): String
+
+    @FastNative
+    private external fun processToolResponse(toolName: String, callId: String, content: String, predictLength: Int): Int
 
     private val _state =
         MutableStateFlow<InferenceEngine.State>(InferenceEngine.State.Uninitialized)
@@ -156,9 +171,9 @@ internal class InferenceEngineImpl private constructor(
     /**
      * Load the LLM
      */
-    override suspend fun configure(nCtx: Int, kvCacheType: Int) =
+    override suspend fun configure(nCtx: Int, kvCacheType: Int, threads: Int) =
         withContext(llamaDispatcher) {
-            nativeConfigure(nCtx, kvCacheType)
+            nativeConfigure(nCtx, kvCacheType, threads)
         }
 
     override suspend fun updateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float) =
@@ -238,6 +253,54 @@ internal class InferenceEngineImpl private constructor(
             _state.value = InferenceEngine.State.ModelReady
         }
 
+    override suspend fun setTools(toolsJson: String) =
+        withContext(llamaDispatcher) {
+            nativeSetTools(toolsJson)
+        }
+
+    override suspend fun hasNativeToolSupport(): Boolean =
+        withContext(llamaDispatcher) {
+            nativeHasToolSupport()
+        }
+
+    override suspend fun parseResponse(rawText: String, isPartial: Boolean): ParsedResponse =
+        withContext(llamaDispatcher) {
+            val jsonStr = nativeParseResponse(rawText, isPartial)
+            try {
+                val json = JSONObject(jsonStr)
+                val content = json.optString("content", rawText)
+                val thinking = json.optString("reasoning_content", "")
+                val hasParser = json.optBoolean("has_parser", false)
+                val callsArray = json.optJSONArray("tool_calls")
+                val toolCalls = mutableListOf<ToolCallInfo>()
+                if (callsArray != null) {
+                    for (i in 0 until callsArray.length()) {
+                        val tc = callsArray.getJSONObject(i)
+                        toolCalls.add(
+                            ToolCallInfo(
+                                name = tc.optString("name", ""),
+                                arguments = tc.optString("arguments", ""),
+                                id = tc.optString("id", "")
+                            )
+                        )
+                    }
+                }
+                ParsedResponse(
+                    content = content,
+                    thinking = thinking,
+                    toolCalls = toolCalls,
+                    hasParser = hasParser
+                )
+            } catch (e: Exception) {
+                ParsedResponse(
+                    content = rawText,
+                    thinking = "",
+                    toolCalls = emptyList(),
+                    hasParser = false
+                )
+            }
+        }
+
     /**
      * Send plain text user prompt to LLM, which starts generating tokens in a [Flow]
      */
@@ -263,6 +326,53 @@ internal class InferenceEngineImpl private constructor(
             }
 
             Log.i(TAG, "User prompt processed. Generating assistant prompt...")
+            _state.value = InferenceEngine.State.Generating
+            while (!_cancelGeneration) {
+                generateNextToken()?.let { utf8token ->
+                    if (utf8token.isNotEmpty()) emit(utf8token)
+                } ?: break
+            }
+            if (_cancelGeneration) {
+                Log.i(TAG, "Assistant generation aborted per requested.")
+            } else {
+                Log.i(TAG, "Assistant generation complete. Awaiting user prompt...")
+            }
+            _state.value = InferenceEngine.State.ModelReady
+        } catch (e: CancellationException) {
+            Log.i(TAG, "Assistant generation's flow collection cancelled.")
+            _state.value = InferenceEngine.State.ModelReady
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during generation!", e)
+            _state.value = InferenceEngine.State.Error(e)
+            throw e
+        }
+    }.flowOn(llamaDispatcher)
+
+    override fun sendToolResponse(
+        toolName: String,
+        callId: String,
+        content: String,
+        predictLength: Int,
+    ): Flow<String> = flow {
+        require(content.isNotEmpty()) { "Tool response discarded due to being empty!" }
+        check(_state.value is InferenceEngine.State.ModelReady) {
+            "Tool response discarded due to: ${_state.value.javaClass.simpleName}"
+        }
+
+        try {
+            Log.i(TAG, "Sending tool response for $toolName...")
+            _readyForSystemPrompt = false
+            _state.value = InferenceEngine.State.ProcessingUserPrompt
+
+            processToolResponse(toolName, callId, content, predictLength).let { result ->
+                if (result != 0) {
+                    Log.e(TAG, "Failed to process tool response: $result")
+                    return@flow
+                }
+            }
+
+            Log.i(TAG, "Tool response processed. Generating assistant prompt...")
             _state.value = InferenceEngine.State.Generating
             while (!_cancelGeneration) {
                 generateNextToken()?.let { utf8token ->

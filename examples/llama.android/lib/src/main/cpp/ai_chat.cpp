@@ -36,6 +36,7 @@ constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
 // Runtime-tunable config, set from the app via configure()/updateSampling().
 // Context size and KV types apply on the next model load; sampling applies live.
 static int            g_n_ctx           = DEFAULT_CONTEXT_SIZE;
+static int            g_n_threads       = 0; // 0 = auto
 static enum ggml_type g_type_k          = GGML_TYPE_F16;
 static enum ggml_type g_type_v          = GGML_TYPE_F16;
 static float          g_temp            = DEFAULT_SAMPLER_TEMP;
@@ -48,6 +49,13 @@ static llama_context                    * g_context;
 static llama_batch                        g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
+
+using json = common_json;
+
+static std::vector<common_chat_tool>      g_tools;
+static common_chat_params                 g_active_chat_params;
+static common_chat_parser_params          g_active_parser_params;
+static bool                               g_has_active_parser = false;
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -102,10 +110,12 @@ static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
 
     const int ctx = n_ctx > 0 ? n_ctx : g_n_ctx;
 
-    // Multi-threading setup
-    const int n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
-                                                     (int) sysconf(_SC_NPROCESSORS_ONLN) -
-                                                     N_THREADS_HEADROOM));
+    // Multi-threading setup; explicit user value wins, otherwise a capped default
+    const int n_threads = g_n_threads > 0
+        ? g_n_threads
+        : std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
+                                           (int) sysconf(_SC_NPROCESSORS_ONLN) -
+                                           N_THREADS_HEADROOM));
     LOGi("%s: Using %d threads", __func__, n_threads);
 
     // Context parameters setup
@@ -122,6 +132,7 @@ static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
     ctx_params.n_threads_batch = n_threads;
     ctx_params.type_k = g_type_k;
     ctx_params.type_v = g_type_v;
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
@@ -138,13 +149,14 @@ static common_sampler *new_sampler() {
     return common_sampler_init(g_model, sparams);
 }
 
-// Applies context size + KV cache type on the next model load.
-// kv_type: 0 = F16, 1 = Q8_0, 2 = Q4_0.
+// Applies context size + KV cache type + thread count on the next model load.
+// kv_type: 0 = F16, 1 = Q8_0, 2 = Q4_0. n_threads <= 0 = auto.
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_nativeConfigure(JNIEnv * /*env*/, jobject /*unused*/,
-        jint n_ctx, jint kv_type) {
+        jint n_ctx, jint kv_type, jint n_threads) {
     g_n_ctx = n_ctx > 0 ? n_ctx : DEFAULT_CONTEXT_SIZE;
+    g_n_threads = n_threads > 0 ? n_threads : 0;
     enum ggml_type kv = GGML_TYPE_F16;
     if (kv_type == 1) {
         kv = GGML_TYPE_Q8_0;
@@ -153,7 +165,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeConfigure(JNIEnv * /*env*
     }
     g_type_k = kv;
     g_type_v = kv;
-    LOGi("%s: n_ctx=%d kv=%d", __func__, g_n_ctx, (int) kv_type);
+    LOGi("%s: n_ctx=%d kv=%d n_threads=%d", __func__, g_n_ctx, (int) kv_type, g_n_threads);
 }
 
 // Updates sampling live; takes effect on the next prompt when idle.
@@ -316,6 +328,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_benchModel(JNIEnv *env, jobject
 constexpr const char *ROLE_SYSTEM       = "system";
 constexpr const char *ROLE_USER         = "user";
 constexpr const char *ROLE_ASSISTANT    = "assistant";
+constexpr const char *ROLE_TOOL         = "tool";
 
 static std::vector<common_chat_msg> chat_msgs;
 static llama_pos system_prompt_position;
@@ -325,6 +338,7 @@ static void reset_long_term_states(const bool clear_kv_cache = true) {
     chat_msgs.clear();
     system_prompt_position = 0;
     current_position = 0;
+    g_has_active_parser = false;
 
     if (clear_kv_cache)
         llama_memory_clear(llama_get_memory(g_context), false);
@@ -347,33 +361,126 @@ static void shift_context() {
     LOGi("%s: Context shifting done! Current position: %d", __func__, current_position);
 }
 
-static std::string chat_add_and_format(const std::string &role, const std::string &content) {
+static std::string chat_format_single_with_tools(const struct common_chat_templates * tmpls,
+                                                const std::vector<common_chat_msg> & past_msg,
+                                                const common_chat_msg & new_msg,
+                                                bool add_ass,
+                                                bool use_jinja) {
+    const llama_vocab * vocab = llama_model_get_vocab(g_model);
+    common_chat_templates_inputs inputs;
+    inputs.use_jinja = use_jinja;
+    inputs.add_bos = llama_vocab_get_add_bos(vocab);
+    inputs.add_eos = llama_vocab_get_add_eos(vocab);
+    if (!g_tools.empty()) {
+        inputs.tools = g_tools;
+    }
+    inputs.enable_thinking = true;
+    inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+
+    std::string fmt_past_msg;
+    if (!past_msg.empty()) {
+        inputs.messages = past_msg;
+        inputs.add_generation_prompt = false;
+        fmt_past_msg = common_chat_templates_apply(tmpls, inputs).prompt;
+    }
+    std::ostringstream ss;
+    if (add_ass && !fmt_past_msg.empty() && fmt_past_msg.back() == '\n') {
+        ss << "\n";
+    }
+    inputs.messages.push_back(new_msg);
+    inputs.add_generation_prompt = add_ass;
+
+    auto params = common_chat_templates_apply(tmpls, inputs);
+    auto fmt_new_msg = params.prompt;
+
+    if (add_ass) {
+        g_active_chat_params = params;
+        g_active_parser_params = common_chat_parser_params(g_active_chat_params);
+        g_active_parser_params.parse_tool_calls = true;
+        g_active_parser_params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+        if (!g_active_chat_params.parser.empty()) {
+            common_peg_arena arena;
+            arena.load(g_active_chat_params.parser);
+            g_active_parser_params.parser = std::move(arena);
+            g_has_active_parser = true;
+            LOGi("%s: Active chat parser initialized (format=%s, thinking=%d)",
+                 __func__, common_chat_format_name(g_active_chat_params.format),
+                 (int) g_active_chat_params.supports_thinking);
+        } else {
+            g_has_active_parser = false;
+        }
+    }
+
+    if (fmt_new_msg.size() >= fmt_past_msg.size()) {
+        ss << fmt_new_msg.substr(fmt_past_msg.size(), fmt_new_msg.size() - fmt_past_msg.size());
+    } else {
+        ss << fmt_new_msg;
+    }
+    return ss.str();
+}
+
+static std::string chat_add_and_format(const std::string &role, const std::string &content,
+                                      const std::string &tool_name = "", const std::string &tool_call_id = "") {
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
+    new_msg.tool_name = tool_name;
+    new_msg.tool_call_id = tool_call_id;
+
     std::string formatted;
+    bool add_ass = (role == ROLE_USER || role == ROLE_TOOL);
     try {
-        formatted = common_chat_format_single(
-                g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ true);
+        formatted = chat_format_single_with_tools(
+                g_chat_templates.get(), chat_msgs, new_msg, add_ass, /* use_jinja */ true);
     } catch (const std::exception &e) {
-        LOGw("%s: Jinja format failed: %s, falling back to legacy...", __func__, e.what());
+        LOGw("%s: Jinja format with tools failed: %s, falling back...", __func__, e.what());
         try {
+            if (role == ROLE_TOOL) {
+                new_msg.role = ROLE_USER;
+            }
             formatted = common_chat_format_single(
-                    g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
+                    g_chat_templates.get(), chat_msgs, new_msg, add_ass, /* use_jinja */ true);
         } catch (const std::exception &e2) {
-            LOGe("%s: Legacy format also failed: %s, falling back to raw formatting", __func__, e2.what());
-            if (role == ROLE_SYSTEM) {
-                formatted = "<|system|>\n" + content + "\n";
-            } else if (role == ROLE_USER) {
-                formatted = "<|user|>\n" + content + "\n<|assistant|>\n";
-            } else {
-                formatted = content;
+            LOGw("%s: Jinja format without tools also failed: %s, falling back to legacy...", __func__, e2.what());
+            try {
+                formatted = common_chat_format_single(
+                        g_chat_templates.get(), chat_msgs, new_msg, add_ass, /* use_jinja */ false);
+            } catch (const std::exception &e3) {
+                LOGe("%s: Legacy format also failed: %s, falling back to raw formatting", __func__, e3.what());
+                if (role == ROLE_SYSTEM) {
+                    formatted = "<|system|>\n" + content + "\n";
+                } else if (role == ROLE_USER || role == ROLE_TOOL) {
+                    formatted = "<|user|>\n" + content + "\n<|assistant|>\n";
+                } else {
+                    formatted = content;
+                }
             }
         }
     }
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
     return formatted;
+}
+
+static void record_assistant_message(const std::string & response) {
+    common_chat_msg new_msg;
+    new_msg.role = ROLE_ASSISTANT;
+    new_msg.content = response;
+    if (g_has_active_parser) {
+        try {
+            common_chat_msg parsed = common_chat_parse(response, false, g_active_parser_params);
+            if (!parsed.tool_calls.empty()) {
+                new_msg.tool_calls = parsed.tool_calls;
+                new_msg.reasoning_content = parsed.reasoning_content;
+                new_msg.content = parsed.content;
+                LOGi("%s: Recorded assistant tool call in chat_msgs (name=%s, count=%zu)",
+                     __func__, parsed.tool_calls[0].name.c_str(), parsed.tool_calls.size());
+            }
+        } catch (const std::exception & e) {
+            LOGw("%s: Failed to parse assistant response: %s", __func__, e.what());
+        }
+    }
+    chat_msgs.push_back(new_msg);
 }
 
 /**
@@ -613,6 +720,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Stop if reaching the marked position
     if (current_position >= stop_generation_position) {
         LOGw("%s: STOP: hitting stop position: %d", __func__, stop_generation_position);
+        record_assistant_message(assistant_ss.str());
         return nullptr;
     }
 
@@ -624,7 +732,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Stop if next token is EOG
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
         LOGi("id: %d,\tIS EOG!\nSTOP.", new_token_id);
-        chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+        record_assistant_message(assistant_ss.str());
         return nullptr;
     }
 
@@ -667,6 +775,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     reset_short_term_states();
 
     // Free up resources
+    g_tools.clear();
+    g_has_active_parser = false;
     common_sampler_free(g_sampler);
     g_sampler = nullptr;
     g_chat_templates.reset();
@@ -681,4 +791,171 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_shutdown(JNIEnv *, jobject /*unused*/) {
     llama_backend_free();
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeSetTools(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jstring jtools_json
+) {
+    g_tools.clear();
+    g_has_active_parser = false;
+    if (!jtools_json) return;
+
+    const char *tools_str = env->GetStringUTFChars(jtools_json, nullptr);
+    if (tools_str && tools_str[0] != '\0') {
+        try {
+            auto j = json::parse(tools_str);
+            if (j.is_array()) {
+                for (const auto & item : j) {
+                    common_chat_tool tool;
+                    if (item.contains("function")) {
+                        const auto & f = item["function"];
+                        tool.name = f.value("name", "");
+                        tool.description = f.value("description", "");
+                        if (f.contains("parameters")) {
+                            tool.parameters = f["parameters"].dump();
+                        }
+                    } else {
+                        tool.name = item.value("name", "");
+                        tool.description = item.value("description", "");
+                        if (item.contains("parameters")) {
+                            tool.parameters = item["parameters"].dump();
+                        }
+                    }
+                    if (!tool.name.empty()) {
+                        g_tools.push_back(tool);
+                    }
+                }
+                LOGi("%s: Registered %zu tools", __func__, g_tools.size());
+            }
+        } catch (const std::exception & e) {
+            LOGe("%s: Failed to parse tools JSON: %s", __func__, e.what());
+        }
+    }
+    if (tools_str) {
+        env->ReleaseStringUTFChars(jtools_json, tools_str);
+    }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeHasToolSupport(
+        JNIEnv * /*env*/,
+        jobject /*unused*/
+) {
+    if (!g_chat_templates) return JNI_FALSE;
+    const auto caps = common_chat_templates_get_caps(g_chat_templates.get());
+    const auto it = caps.find("supports_tools");
+    return (it != caps.end() && it->second) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeParseResponse(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jstring jraw_text,
+        jboolean jis_partial
+) {
+    json out;
+    if (!jraw_text) {
+        out["has_parser"] = false;
+        out["content"] = "";
+        out["reasoning_content"] = "";
+        out["tool_calls"] = json::array();
+        return env->NewStringUTF(out.dump().c_str());
+    }
+
+    const char *raw_chars = env->GetStringUTFChars(jraw_text, nullptr);
+    std::string raw_text(raw_chars ? raw_chars : "");
+    if (raw_chars) {
+        env->ReleaseStringUTFChars(jraw_text, raw_chars);
+    }
+
+    if (g_has_active_parser) {
+        try {
+            common_chat_msg parsed = common_chat_parse(raw_text, (bool) jis_partial, g_active_parser_params);
+            out["has_parser"] = true;
+            out["content"] = parsed.content;
+            out["reasoning_content"] = parsed.reasoning_content;
+            out["tool_calls"] = json::array();
+            for (const auto & tc : parsed.tool_calls) {
+                out["tool_calls"].push_back({
+                    {"name", tc.name},
+                    {"arguments", tc.arguments},
+                    {"id", tc.id}
+                });
+            }
+            return env->NewStringUTF(out.dump().c_str());
+        } catch (const std::exception & e) {
+            LOGw("%s: common_chat_parse failed: %s", __func__, e.what());
+        }
+    }
+
+    out["has_parser"] = false;
+    out["content"] = raw_text;
+    out["reasoning_content"] = "";
+    out["tool_calls"] = json::array();
+    return env->NewStringUTF(out.dump().c_str());
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_processToolResponse(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jstring jtool_name,
+        jstring jcall_id,
+        jstring jcontent,
+        jint n_predict
+) {
+    // Reset short-term states
+    reset_short_term_states();
+
+    const char *tool_name_chars = jtool_name ? env->GetStringUTFChars(jtool_name, nullptr) : nullptr;
+    const char *call_id_chars = jcall_id ? env->GetStringUTFChars(jcall_id, nullptr) : nullptr;
+    const char *content_chars = env->GetStringUTFChars(jcontent, nullptr);
+
+    std::string tool_name(tool_name_chars ? tool_name_chars : "");
+    std::string call_id(call_id_chars ? call_id_chars : "");
+    std::string content(content_chars ? content_chars : "");
+
+    if (tool_name_chars) env->ReleaseStringUTFChars(jtool_name, tool_name_chars);
+    if (call_id_chars) env->ReleaseStringUTFChars(jcall_id, call_id_chars);
+    env->ReleaseStringUTFChars(jcontent, content_chars);
+
+    LOGd("%s: Tool response received for '%s': \n%s", __func__, tool_name.c_str(), content.c_str());
+
+    std::string formatted_tool_prompt = content;
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    if (has_chat_template) {
+        formatted_tool_prompt = chat_add_and_format(ROLE_TOOL, content, tool_name, call_id);
+    }
+
+    // Tokenize
+    auto tool_tokens = common_tokenize(g_context, formatted_tool_prompt, has_chat_template, has_chat_template);
+    for (auto id: tool_tokens) {
+        LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
+    }
+
+    const int tool_prompt_size = (int) tool_tokens.size();
+    const int max_batch_size = g_n_ctx - OVERFLOW_HEADROOM;
+    if (tool_prompt_size > max_batch_size) {
+        const int skipped_tokens = tool_prompt_size - max_batch_size;
+        tool_tokens.resize(max_batch_size);
+        LOGw("%s: Tool prompt too long! Skipped %d tokens!", __func__, skipped_tokens);
+    }
+
+    // Decode tool tokens in batches
+    if (decode_tokens_in_batches(g_context, g_batch, tool_tokens, current_position, true)) {
+        LOGe("%s: llama_decode() failed!", __func__);
+        return 2;
+    }
+
+    current_position += tool_prompt_size;
+    stop_generation_position = current_position + tool_prompt_size + n_predict;
+    return 0;
 }
