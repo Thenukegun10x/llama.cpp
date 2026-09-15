@@ -34,6 +34,13 @@
             android:text="@string/tool_sandbox_files"
             android:textAppearance="?attr/textAppearanceBodyMedium" />
 
+        <com.google.android.material.checkbox.MaterialCheckBox
+            android:id="@+id/toggle_web"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/tool_web_search"
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
+
     </LinearLayout>
 
 </LinearLayout>

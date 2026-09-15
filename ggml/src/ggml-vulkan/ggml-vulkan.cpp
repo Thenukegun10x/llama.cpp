@@ -191,6 +191,7 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
 #define VK_VENDOR_ID_INTEL 0x8086
 #define VK_VENDOR_ID_NVIDIA 0x10de
 #define VK_VENDOR_ID_QUALCOMM 0x5143
+#define VK_VENDOR_ID_SAMSUNG 0x144d
 
 #define VK_DEVICE_DESCRIPTOR_POOL_SIZE 256
 
@@ -429,6 +430,10 @@ enum vk_device_architecture {
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
+
+    if (props.vendorID == VK_VENDOR_ID_SAMSUNG) {
+        return vk_device_architecture::AMD_RDNA3;
+    }
 
     if (props.vendorID == VK_VENDOR_ID_AMD) {
         const std::vector<vk::ExtensionProperties> ext_props = device.enumerateDeviceExtensionProperties();
@@ -5490,7 +5495,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         rm_stdq_int = 2;
     }
     // RDNA3: above four columns, static 4 rows for all types bench faster than the default
-    const bool is_rdna3 = device->vendor_id == VK_VENDOR_ID_AMD && device->architecture == AMD_RDNA3;
+    const bool is_rdna3 = (device->vendor_id == VK_VENDOR_ID_AMD || device->vendor_id == VK_VENDOR_ID_SAMSUNG) && device->architecture == AMD_RDNA3;
     auto const &rm_int_n = [&](uint32_t rows, uint32_t i) { return (is_rdna3 && i >= 4) ? 4u : rows; };
     // RDNA3: Static 4 rows for all types bench faster than the default
     auto const &rm_id = [&](uint32_t rows) { return is_rdna3 ? 4u : rows; };
@@ -6766,6 +6771,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device->shader_core_count = amd_shader_core_properties2_props.activeComputeUnitCount;
         } else if (device->vendor_id == VK_VENDOR_ID_INTEL) {
             device->shader_core_count = ggml_vk_intel_shader_core_count(device->physical_device);
+        } else if (device->vendor_id == VK_VENDOR_ID_SAMSUNG) {
+            device->shader_core_count = 6;
         } else {
             device->shader_core_count = 0;
         }
@@ -7347,6 +7354,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
                 device->mul_mat_id_s[i] = false;
                 break;
             case VK_VENDOR_ID_QUALCOMM:
+            case VK_VENDOR_ID_SAMSUNG:
                 device->mul_mat_l[i] = false;
                 device->mul_mat_m[i] = true;
                 device->mul_mat_s[i] = true;
@@ -18089,7 +18097,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     uint64_t flops_cap = 200'000'000'000ULL;
 
     // On weaker AMD GPUs larger submissions can hit a driver timeout, submit more often to avoid this
-    if (ctx->device->vendor_id == VK_VENDOR_ID_AMD && ctx->device->shader_core_count > 0) {
+    if ((ctx->device->vendor_id == VK_VENDOR_ID_AMD || ctx->device->vendor_id == VK_VENDOR_ID_SAMSUNG) && ctx->device->shader_core_count > 0) {
         if (ctx->device->architecture == AMD_GCN && ctx->device->shader_core_count < 32) {
             flops_cap = 500'000'000ULL * ctx->device->shader_core_count;
         } else if (ctx->device->architecture != AMD_GCN && ctx->device->shader_core_count < 24) {

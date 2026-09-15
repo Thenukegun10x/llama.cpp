@@ -19,7 +19,8 @@ if(DEFINED ANDROID_ABI)
     message(STATUS "Detected Android ABI: ${ANDROID_ABI}")
     if(ANDROID_ABI STREQUAL "arm64-v8a")
         set(GGML_SYSTEM_ARCH "ARM")
-        set(GGML_CPU_KLEIDIAI ON)
+        set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+        set(GGML_VULKAN ON CACHE BOOL "" FORCE)
         set(GGML_OPENMP ON)
     elseif(ANDROID_ABI STREQUAL "x86_64")
         set(GGML_SYSTEM_ARCH "x86")
@@ -55,10 +56,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         log)
 
-# The NDK sysroot provides vulkan/vulkan.h but not the C++ vulkan/vulkan.hpp
-# header; pull that from the Vulkan SDK when building the Vulkan backend.
-if(DEFINED ENV{VULKAN_SDK})
-    target_include_directories(ggml-vulkan PRIVATE "$ENV{VULKAN_SDK}/Include")
+if(TARGET ggml-vulkan)
+    if(DEFINED ENV{VULKAN_SDK})
+        target_include_directories(ggml-vulkan PRIVATE "$ENV{VULKAN_SDK}/Include")
+    else()
+        target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_LIST_DIR}/vulkan-headers")
+    endif()
 endif()
 
 # Image generation backend was removed; this library builds the LLM chat JNI only.

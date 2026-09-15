@@ -45,12 +45,12 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     kotlin {
-        jvmToolchain(17)
+        jvmToolchain(21)
     }
 
     androidResources {
@@ -65,11 +65,14 @@ android {
 dependencies {
     implementation(libs.bundles.androidx)
     implementation(libs.material)
+    implementation(libs.jsoup)
     implementation(files("libs/sherpa-onnx-1.13.4.aar"))
 
     implementation(project(":lib"))
 
     testImplementation(libs.junit)
+    // Real org.json on the JVM test classpath; android.jar only has stubs
+    testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }

@@ -70,6 +70,17 @@ extern "C"
 JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path) {
     llama_model_params model_params = llama_model_default_params();
+    model_params.use_extra_bufts = false;
+
+    // Keep the large output projection (vocab size 128k, ~200MB) on CPU to avoid
+    // mobile GPU storage buffer range limitations (>128MB) and driver fence hangs,
+    // while keeping all 29 repeating transformer layers accelerated on Vulkan GPU.
+    static const llama_model_tensor_buft_override tensor_buft_overrides[] = {
+        { "output\\.weight", ggml_backend_cpu_buffer_type() },
+        { "^output$",        ggml_backend_cpu_buffer_type() },
+        { nullptr,           nullptr }
+    };
+    model_params.tensor_buft_overrides = tensor_buft_overrides;
 
     const auto *model_path = env->GetStringUTFChars(jmodel_path, 0);
     LOGd("%s: Loading model from: \n%s\n", __func__, model_path);
@@ -340,8 +351,26 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
-    auto formatted = common_chat_format_single(
-            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
+    std::string formatted;
+    try {
+        formatted = common_chat_format_single(
+                g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ true);
+    } catch (const std::exception &e) {
+        LOGw("%s: Jinja format failed: %s, falling back to legacy...", __func__, e.what());
+        try {
+            formatted = common_chat_format_single(
+                    g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
+        } catch (const std::exception &e2) {
+            LOGe("%s: Legacy format also failed: %s, falling back to raw formatting", __func__, e2.what());
+            if (role == ROLE_SYSTEM) {
+                formatted = "<|system|>\n" + content + "\n";
+            } else if (role == ROLE_USER) {
+                formatted = "<|user|>\n" + content + "\n<|assistant|>\n";
+            } else {
+                formatted = content;
+            }
+        }
+    }
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
     return formatted;
@@ -381,12 +410,12 @@ static int decode_tokens_in_batches(
         const llama_tokens &tokens,
         const llama_pos start_pos,
         const bool compute_last_logit = false) {
-    // Process tokens in batches using the global batch
-    LOGd("%s: Decode %d tokens starting at position %d", __func__, (int) tokens.size(), start_pos);
+    LOGi("%s: Decode %d tokens starting at position %d (compute_last_logit=%d)",
+         __func__, (int) tokens.size(), start_pos, (int) compute_last_logit);
     for (int i = 0; i < (int) tokens.size(); i += BATCH_SIZE) {
         const int cur_batch_size = std::min((int) tokens.size() - i, BATCH_SIZE);
         common_batch_clear(batch);
-        LOGv("%s: Preparing a batch size of %d starting at: %d", __func__, cur_batch_size, i);
+        LOGi("%s: Preparing batch of %d tokens (offset %d)", __func__, cur_batch_size, i);
 
         // Shift context if current batch cannot fit into the context
         if (start_pos + i + cur_batch_size >= g_n_ctx - OVERFLOW_HEADROOM) {
@@ -403,12 +432,15 @@ static int decode_tokens_in_batches(
         }
 
         // Decode this batch
+        LOGi("%s: Calling llama_decode(batch_size=%d)...", __func__, cur_batch_size);
         const int decode_result = llama_decode(context, batch);
+        LOGi("%s: llama_decode returned %d", __func__, decode_result);
         if (decode_result) {
             LOGe("%s: llama_decode failed w/ %d", __func__, decode_result);
             return 1;
         }
     }
+    LOGi("%s: All batches decoded successfully", __func__);
     return 0;
 }
 
@@ -566,24 +598,25 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     // Sample next token
     const auto new_token_id = common_sampler_sample(g_sampler, g_context, -1);
     common_sampler_accept(g_sampler, new_token_id, true);
+    LOGi("%s: Sampled token %d ('%s')", __func__, new_token_id, common_token_to_piece(g_context, new_token_id).c_str());
+
+    // Stop if next token is EOG
+    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
+        LOGi("id: %d,\tIS EOG!\nSTOP.", new_token_id);
+        chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+        return nullptr;
+    }
 
     // Populate the batch with new token, then decode
     common_batch_clear(g_batch);
     common_batch_add(g_batch, new_token_id, current_position, {0}, true);
     if (llama_decode(g_context, g_batch) != 0) {
-        LOGe("%s: llama_decode() failed for generated token", __func__);
+        LOGe("%s: llama_decode() failed for generated token %d", __func__, new_token_id);
         return nullptr;
     }
 
     // Update position
     current_position++;
-
-    // Stop if next token is EOG
-    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
-        LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
-        chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
-        return nullptr;
-    }
 
     // If not EOG, convert to text
     auto new_token_chars = common_token_to_piece(g_context, new_token_id);

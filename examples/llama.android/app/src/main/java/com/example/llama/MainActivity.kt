@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
@@ -53,6 +54,7 @@ private data class ResponseSplit(val thinking: String, val tooling: String, val 
 
 private sealed class ToolCall {
     data class Sandbox(val call: SandboxToolCall) : ToolCall()
+    data class WebSearch(val call: WebSearchCall) : ToolCall()
 }
 
 class MainActivity : AppCompatActivity() {
@@ -69,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ctxBar: ProgressBar
     private lateinit var chatStore: ConversationStore
     private lateinit var sandboxTools: SandboxFileTools
+    private lateinit var webSearchTools: WebSearchTool
     private lateinit var modelRepository: HuggingFaceModelRepository
     private lateinit var speechRecognizer: OnDeviceSpeechRecognizer
     private lateinit var toolSettings: ToolSettings
@@ -103,6 +106,7 @@ class MainActivity : AppCompatActivity() {
 
         chatStore = ConversationStore(applicationContext)
         sandboxTools = SandboxFileTools(applicationContext)
+        webSearchTools = WebSearchTool()
         modelRepository = HuggingFaceModelRepository(applicationContext)
         speechRecognizer = OnDeviceSpeechRecognizer(applicationContext)
         toolSettings = ToolSettings(applicationContext)
@@ -218,13 +222,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildSystemPrompt(): String {
         val parts = mutableListOf<String>()
-        parts.add("You are a helpful private, offline assistant. Answer normally unless a tool is needed.")
+        parts.add("You are a helpful assistant running on the user's phone. Most work happens on-device; web tools reach the live internet when enabled. Answer normally unless a tool is needed.")
 
         if (!toolSettings.allToolsEnabled) {
             parts.add("")
-            parts.add("When using a tool, output only one call in this exact wrapper:")
-            parts.add("""<tool_call>{"name":"tool_name"}</tool_call>""")
-            parts.add("Use one tool at a time. Wait for <tool_result> before reporting success. Never invent a tool result.")
+            parts.add("Tools are currently disabled. Answer directly from your own knowledge.")
             return parts.joinToString("\n")
         }
 
@@ -238,15 +240,30 @@ class MainActivity : AppCompatActivity() {
             toolDescs.add("""edit_file: {"name":"edit_file","path":"notes.txt","old_text":"unique old text","new_text":"new text"}""")
             toolDescs.add("Use one tool at a time. Read before editing when unsure. For edit_file, old_text can be a short distinctive excerpt; matching tolerates case and whitespace differences but must be unique.")
         }
+        if (toolSettings.webToolsEnabled) {
+            if (toolDescs.isNotEmpty()) toolDescs.add("")
+            toolDescs.add("WEB TOOLS (live internet search and page reading):")
+            toolDescs.add("""web_search: {"name":"web_search","query":"search terms","limit":5,"offset":0}""")
+            toolDescs.add("  - query: search terms (required)")
+            toolDescs.add("  - limit: results to return, 1-10 (optional, default: 5)")
+            toolDescs.add("  - offset: skip this many results to see more (optional, default: 0)")
+            toolDescs.add("""web_fetch: {"name":"web_fetch","url":"https://example.com/page","max_chars":6000}""")
+            toolDescs.add("  - url: page to read as filtered text (required)")
+            toolDescs.add("  - max_chars: max text chars, 500-20000 (optional, default: 6000)")
+            toolDescs.add("Search first, then fetch the most promising result. Use offset for more results.")
+        }
         if (toolDescs.isNotEmpty()) {
             parts.add("")
             parts.addAll(toolDescs)
         }
 
         parts.add("")
-        parts.add("When using a tool, output only one call in this exact wrapper:")
-        parts.add("""<tool_call>{"name":"tool_name","prompt":"..."}</tool_call>""")
-        parts.add("Use one tool at a time. Wait for <tool_result> before reporting success. Never invent a tool result.")
+        parts.add("To use a tool, output only one call in this exact wrapper:")
+        parts.add("""<tool_call>{"name":"read_file","path":"notes.txt"}</tool_call>""")
+        parts.add("Rules:")
+        parts.add("- One tool call per message. Wait for <tool_result> before continuing.")
+        parts.add("- Never invent a tool result. If no tool fits, just answer directly.")
+        parts.add("- Answer from the tool result; do not paste raw JSON back to the user.")
         return parts.joinToString("\n")
     }
 
@@ -255,13 +272,16 @@ class MainActivity : AppCompatActivity() {
         val content = layoutInflater.inflate(R.layout.dialog_tool_settings, null)
         val allToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_all_tools)
         val sandboxToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_sandbox)
+        val webToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_web)
 
         allToggle.isChecked = toolSettings.allToolsEnabled
         sandboxToggle.isChecked = toolSettings.sandboxToolsEnabled
+        webToggle.isChecked = toolSettings.webToolsEnabled
 
         fun applyChildEnabled() {
             val enabled = allToggle.isChecked
             sandboxToggle.isEnabled = enabled
+            webToggle.isEnabled = enabled
         }
         applyChildEnabled()
 
@@ -270,6 +290,7 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnDismissListener {
             toolSettings.allToolsEnabled = allToggle.isChecked
             toolSettings.sandboxToolsEnabled = sandboxToggle.isChecked
+            toolSettings.webToolsEnabled = webToggle.isChecked
         }
 
         dialog.setContentView(content)
@@ -574,9 +595,11 @@ class MainActivity : AppCompatActivity() {
                 var streamedTokens = 0
                 while (true) {
                     val generatedResponse = StringBuilder()
+                    var turnEmittedTokens = 0
                     inferenceEngine.sendUserPrompt(nextPrompt, inferenceSettings.maxTokens).collect { token ->
                         generatedResponse.append(token)
                         producedOutput = true
+                        turnEmittedTokens++
                         if (++streamedTokens % 8 == 0) updateCtxTracker()
                         withContext(Dispatchers.Main) {
                             val split = splitResponse(generatedResponse.toString())
@@ -586,7 +609,15 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    val toolCall = parseAnyToolCall(generatedResponse.toString()) ?: break
+                    val toolCall = parseAnyToolCall(generatedResponse.toString())
+                    if (toolCall == null) {
+                        if (turnEmittedTokens == 0 && toolCallCount > 0) {
+                            withContext(Dispatchers.Main) {
+                                updateLastAssistantMessage(getString(R.string.generation_stopped))
+                            }
+                        }
+                        break
+                    }
                     if (toolCallCount >= MAX_TOOL_CALLS_PER_TURN) break
 
                     val toolResult = withContext(Dispatchers.IO) { executeToolCall(toolCall) }
@@ -711,22 +742,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseAnyToolCall(response: String): ToolCall? {
+        if (!toolSettings.allToolsEnabled) return null
         val sandbox = sandboxTools.parseToolCall(response)
         if (sandbox != null) return ToolCall.Sandbox(sandbox)
+        if (toolSettings.webToolsEnabled) {
+            val web = webSearchTools.parseToolCall(response)
+            if (web != null) return ToolCall.WebSearch(web)
+        }
         return null
     }
 
     private fun extractAnyToolJson(response: String): String? {
+        if (!toolSettings.allToolsEnabled) return null
         sandboxTools.extractToolJson(response)?.let { return it }
+        if (toolSettings.webToolsEnabled) {
+            webSearchTools.extractWebJson(response)?.let { return it }
+        }
+        LfmToolParser.extractToolBlock(response)?.let { return it }
         return null
     }
 
     private suspend fun executeToolCall(call: ToolCall): String = when (call) {
         is ToolCall.Sandbox -> sandboxTools.execute(call.call)
+        is ToolCall.WebSearch -> webSearchTools.execute(call.call)
     }
 
     private fun toolResultPrompt(call: ToolCall, result: String): String = when (call) {
         is ToolCall.Sandbox -> sandboxTools.toolResultPrompt(call.call, result)
+        is ToolCall.WebSearch -> webSearchTools.toolResultPrompt(call.call, result)
     }
 
     private fun showConversationHistory() {
@@ -828,7 +871,15 @@ class MainActivity : AppCompatActivity() {
 
         remoteModelsAdapter = RemoteGgufAdapter(onDownload = ::downloadRemoteFile)
         remoteModelsRv.layoutManager = LinearLayoutManager(this)
-        remoteModelsRv.isNestedScrollingEnabled = true
+        // Fixed-height lists consume their own scrolls; the panel only
+        // scrolls on touches outside them.
+        remoteModelsRv.isNestedScrollingEnabled = false
+        remoteModelsRv.setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                view.parent.requestDisallowInterceptTouchEvent(true)
+            }
+            false
+        }
         remoteModelsRv.adapter = remoteModelsAdapter
 
         modelsAdapter = LocalModelAdapter(
@@ -850,6 +901,13 @@ class MainActivity : AppCompatActivity() {
             }
         )
         modelsRv.layoutManager = LinearLayoutManager(this)
+        modelsRv.isNestedScrollingEnabled = false
+        modelsRv.setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                view.parent.requestDisallowInterceptTouchEvent(true)
+            }
+            false
+        }
         modelsRv.adapter = modelsAdapter
 
         importButton.setOnClickListener {

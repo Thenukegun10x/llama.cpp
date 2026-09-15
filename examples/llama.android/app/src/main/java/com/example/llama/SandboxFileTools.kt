@@ -12,13 +12,27 @@ data class SandboxToolCall(
     val newText: String?
 )
 
-class SandboxFileTools(context: Context) {
-    val rootDirectory: File = File(context.filesDir, DIRECTORY_NAME).apply { mkdirs() }.canonicalFile
+class SandboxFileTools(val rootDirectory: File) {
+    constructor(context: Context) : this(
+        File(context.filesDir, DIRECTORY_NAME).apply { mkdirs() }.canonicalFile
+    )
 
     fun parseToolCall(response: String): SandboxToolCall? {
-        val payload = extractToolJson(response) ?: return null
+        val payload = extractToolJson(response)
+        if (payload != null) {
+            runCatching {
+                parseToolCall(JSONObject(payload))?.let { return it }
+            }
+        }
+        val lfmCalls = LfmToolParser.parseToolCalls(response)
+        for (lfmJson in lfmCalls) {
+            parseToolCall(lfmJson)?.let { return it }
+        }
+        return null
+    }
+
+    fun parseToolCall(json: JSONObject): SandboxToolCall? {
         return runCatching {
-            val json = JSONObject(payload)
             val name = canonicalToolName(json.firstString("name", "tool", "action") ?: return null)
                 ?: return null
             SandboxToolCall(
@@ -51,7 +65,7 @@ class SandboxFileTools(context: Context) {
             .put("name", call.name)
             .put("path", call.path ?: "")
             .put("result", result.take(MAX_TOOL_RESULT_CHARS))
-        return "<tool_result>${json}</tool_result>"
+        return "<tool_result>${json}</tool_result>\n\nPlease use the above tool results to answer the user's request."
     }
 
     fun listFiles(): List<String> {
@@ -129,7 +143,15 @@ class SandboxFileTools(context: Context) {
         TOOL_TAG_REGEX.find(response)?.groupValues?.get(1)?.let { tagged ->
             balancedJsonObject(tagged)?.let { return it }
         }
-        return balancedJsonObject(response)
+        balancedJsonObject(response)?.let { return it }
+        val lfmBlock = LfmToolParser.extractToolBlock(response)
+        if (lfmBlock != null) {
+            val hasSandboxTool = LfmToolParser.parseToolCalls(lfmBlock).any {
+                canonicalToolName(it.firstString("name", "tool", "action") ?: "") != null
+            }
+            if (hasSandboxTool) return lfmBlock
+        }
+        return null
     }
 
     private fun balancedJsonObject(text: String): String? {
@@ -215,23 +237,5 @@ class SandboxFileTools(context: Context) {
             """<\s*tool[_ -]?call\s*>(.*?)<\s*/\s*tool[_ -]?call\s*>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
-
-        val SYSTEM_PROMPT: String = """
-            You are a helpful private, offline assistant. Answer normally unless a file tool is needed.
-
-            FILE TOOLS (paths are relative to the private sandbox):
-            list_files: {"name":"list_files"}
-            read_file: {"name":"read_file","path":"notes.txt"}
-            write_file: {"name":"write_file","path":"notes.txt","content":"text"}
-            append_file: {"name":"append_file","path":"notes.txt","content":"more text"}
-            edit_file: {"name":"edit_file","path":"notes.txt","old_text":"unique old text","new_text":"new text"}
-
-            When using a tool, output only one call in this exact wrapper:
-            <tool_call>{"name":"tool_name","path":"relative/path.txt"}</tool_call>
-
-            Use one tool at a time. Read before editing when unsure. For edit_file, old_text can be a short
-            distinctive excerpt; matching tolerates case and whitespace differences but must be unique.
-            Wait for <tool_result> before reporting success. Never invent a tool result.
-        """.trimIndent()
     }
 }

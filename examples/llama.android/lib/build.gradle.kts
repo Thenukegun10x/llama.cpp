@@ -37,11 +37,10 @@ android {
                 arguments += "-DGGML_CPU_ALL_VARIANTS=ON"
                 arguments += "-DGGML_LLAMAFILE=OFF"
 
-                if (vulkanToolchainFile.exists() && vulkanSdkDir != null) {
-                    arguments += "-DGGML_VULKAN=ON"
-                    arguments += "-DGGML_VULKAN_SHADERS_GEN_TOOLCHAIN=${vulkanToolchainFile.absolutePath}"
-                    arguments += "-DSPIRV-Headers_DIR=$vulkanSdkDir/Lib/cmake/SPIRV-Headers"
-                }
+                arguments += "-DGGML_VULKAN=ON"
+                arguments += "-DGGML_CPU_KLEIDIAI=OFF"
+                arguments += "-DVulkan_GLSLC_EXECUTABLE=/usr/bin/glslc"
+                arguments += "-DSPIRV-Headers_DIR=/usr/share/cmake/SPIRV-Headers"
             }
         }
         aarMetadata {
@@ -51,18 +50,20 @@ android {
     externalNativeBuild {
         cmake {
             path("src/main/cpp/CMakeLists.txt")
-            version = "4.3.3"
+            // NOTE: 4.3.3 is not published in the SDK repo (max is 4.1.x);
+            // keep this at a version sdkmanager can actually install.
+            version = "4.1.2"
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
     kotlin {
-        jvmToolchain(17)
+        jvmToolchain(21)
 
         compileOptions {
-            targetCompatibility = JavaVersion.VERSION_17
+            targetCompatibility = JavaVersion.VERSION_21
         }
     }
 
