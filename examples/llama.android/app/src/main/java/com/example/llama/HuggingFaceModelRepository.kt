@@ -14,7 +14,7 @@ import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-enum class ModelType { LLM, IMAGE_GEN, UNKNOWN }
+enum class ModelType { LLM, UNKNOWN }
 
 data class HuggingFaceGgufFile(
     val repositoryId: String,
@@ -34,38 +34,17 @@ class HuggingFaceModelRepository(context: Context) {
     val modelsDirectory: File = File(context.filesDir, "models").apply { mkdirs() }
 
     fun localModels(): List<LocalModel> = modelsDirectory.listFiles()
-        ?.filter { file ->
-            when {
-                file.extension.equals("gguf", ignoreCase = true) -> true
-                file.extension.equals("safetensors", ignoreCase = true) &&
-                    !file.name.lowercase().contains("text_encoder") &&
-                    !file.name.lowercase().contains("vae") &&
-                    !file.name.lowercase().contains("clip") -> true
-                else -> false
-            }
-        }
+        ?.filter { file -> file.extension.equals("gguf", ignoreCase = true) }
         ?.map { LocalModel(it, detectModelType(it)) }
         ?.sortedByDescending { it.file.lastModified() }
         .orEmpty()
 
     fun detectModelType(file: File): ModelType = when {
         file.extension.equals("gguf", ignoreCase = true) -> {
-            val arch = readGgufArchitecture(file)
-            if (arch == null) ModelType.UNKNOWN
-            else if (isSdArchitecture(arch)) ModelType.IMAGE_GEN
+            if (readGgufArchitecture(file) == null) ModelType.UNKNOWN
             else ModelType.LLM
         }
-        file.extension.equals("safetensors", ignoreCase = true) -> ModelType.IMAGE_GEN
         else -> ModelType.UNKNOWN
-    }
-
-    private fun isSdArchitecture(arch: String): Boolean {
-        val lower = arch.lowercase()
-        return lower.contains("sd1") || lower.contains("sd2") || lower.contains("sdxl") ||
-            lower.contains("sd3") || lower.contains("flux") || lower.contains("wan") ||
-            lower.contains("hunyuan") || lower.contains("stable-diffusion") ||
-            lower.contains("sana") || lower.contains("pixart") || lower.contains("lumina") ||
-            lower.contains("kolors") || lower.contains("auraflow") || lower.contains("playground")
     }
 
     private fun readGgufArchitecture(file: File): String? = runCatching {
@@ -174,15 +153,10 @@ class HuggingFaceModelRepository(context: Context) {
                         val path = entry.optString("path")
                         if (entry.optString("type") != "file") continue
 
-                        val isGguf = path.endsWith(".gguf", ignoreCase = true)
-                        val isSafetensor = path.endsWith(".safetensors", ignoreCase = true)
-                        if (!isGguf && !isSafetensor) continue
+                        if (!path.endsWith(".gguf", ignoreCase = true)) continue
 
-                        val autoType = when {
-                            isSafetensor -> ModelType.IMAGE_GEN
-                            else -> ModelType.UNKNOWN
-                        }
-                        if (filterType != null && autoType != ModelType.UNKNOWN && autoType != filterType) continue
+                        val autoType = ModelType.UNKNOWN
+                        if (filterType != null && autoType != filterType) continue
 
                         val lfsSize = entry.optJSONObject("lfs")?.optLong("size", -1L) ?: -1L
                         val size = entry.optLong("size", lfsSize).takeIf { it >= 0 } ?: 0L
@@ -217,9 +191,8 @@ class HuggingFaceModelRepository(context: Context) {
     ): File = withContext(Dispatchers.IO) {
         val url = normalizeUrl(source)
         val modelName = sanitizeFileName(URLDecoder.decode(url.path.substringAfterLast('/'), "UTF-8"))
-        require(modelName.endsWith(".gguf", ignoreCase = true) ||
-            modelName.endsWith(".safetensors", ignoreCase = true)) {
-            "The URL must point to a .gguf or .safetensors file"
+        require(modelName.endsWith(".gguf", ignoreCase = true)) {
+            "The URL must point to a .gguf file"
         }
         download(url, modelName, token, onProgress)
     }
@@ -239,9 +212,8 @@ class HuggingFaceModelRepository(context: Context) {
         token: String?,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
     ): File {
-        require(modelName.endsWith(".gguf", ignoreCase = true) ||
-            modelName.endsWith(".safetensors", ignoreCase = true)) {
-            "The URL must point to a .gguf or .safetensors file"
+        require(modelName.endsWith(".gguf", ignoreCase = true)) {
+            "The URL must point to a .gguf file"
         }
 
         val destination = File(modelsDirectory, modelName)

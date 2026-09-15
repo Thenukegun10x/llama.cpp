@@ -38,10 +38,6 @@ class LocalModelAdapter(
                 holder.typeChip.visibility = View.VISIBLE
                 holder.typeChip.text = "LLM"
             }
-            ModelType.IMAGE_GEN -> {
-                holder.typeChip.visibility = View.VISIBLE
-                holder.typeChip.text = "Image"
-            }
             ModelType.UNKNOWN -> {
                 holder.typeChip.visibility = View.GONE
             }

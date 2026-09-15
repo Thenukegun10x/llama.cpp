@@ -27,12 +27,6 @@
         app:showAsAction="never" />
 
     <item
-        android:id="@+id/action_image_gen"
-        android:icon="@drawable/outline_blur_24"
-        android:title="Image Generation"
-        app:showAsAction="never" />
-
-    <item
         android:id="@+id/action_tool_settings"
         android:icon="@drawable/outline_tune_24"
         android:title="@string/tool_settings"

@@ -9,7 +9,6 @@ import android.util.Log
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
-import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.Spinner
 import android.widget.TextView
@@ -24,10 +23,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.arm.aichat.AiChat
-import com.arm.aichat.ImageGenEngine
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.gguf.GgufMetadata
-import com.arm.aichat.internal.ImageGenEngineImpl
 import com.arm.aichat.isModelLoaded
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -56,7 +53,6 @@ private data class ResponseSplit(val thinking: String, val tooling: String, val 
 
 private sealed class ToolCall {
     data class Sandbox(val call: SandboxToolCall) : ToolCall()
-    data class ImageGen(val call: ImageGenCall) : ToolCall()
 }
 
 class MainActivity : AppCompatActivity() {
@@ -77,8 +73,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speechRecognizer: OnDeviceSpeechRecognizer
     private lateinit var toolSettings: ToolSettings
     private lateinit var inferenceSettings: InferenceSettings
-    private var imageGenEngine: ImageGenEngine? = null
-    private var imageGenTool: ImageGenTool? = null
 
     private var engine: InferenceEngine? = null
     private var engineReady = false
@@ -113,7 +107,6 @@ class MainActivity : AppCompatActivity() {
         speechRecognizer = OnDeviceSpeechRecognizer(applicationContext)
         toolSettings = ToolSettings(applicationContext)
         inferenceSettings = InferenceSettings(applicationContext)
-        initImageGenEngine()
         toolbar = findViewById(R.id.toolbar)
         modelStatusTv = findViewById(R.id.model_status)
         messagesRv = findViewById(R.id.messages)
@@ -179,10 +172,6 @@ class MainActivity : AppCompatActivity() {
                     showSandboxFiles()
                     true
                 }
-                R.id.action_image_gen -> {
-                    showImageGeneration()
-                    true
-                }
                 R.id.action_tool_settings -> {
                     showToolSettings()
                     true
@@ -227,20 +216,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun initImageGenEngine() {
-        try {
-            val outputDir = File(filesDir, "generated_images").apply { mkdirs() }
-            val sdEngine = ImageGenEngineImpl(outputDir)
-            if (sdEngine.state.value.mode != ImageGenEngine.Mode.ERROR) {
-                imageGenEngine = sdEngine
-                imageGenTool = ImageGenTool(sdEngine, outputDir)
-                lifecycleScope.launch { sdEngine.init() }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Image gen not available", e)
-        }
-    }
-
     private fun buildSystemPrompt(): String {
         val parts = mutableListOf<String>()
         parts.add("You are a helpful private, offline assistant. Answer normally unless a tool is needed.")
@@ -263,19 +238,6 @@ class MainActivity : AppCompatActivity() {
             toolDescs.add("""edit_file: {"name":"edit_file","path":"notes.txt","old_text":"unique old text","new_text":"new text"}""")
             toolDescs.add("Use one tool at a time. Read before editing when unsure. For edit_file, old_text can be a short distinctive excerpt; matching tolerates case and whitespace differences but must be unique.")
         }
-        if (toolSettings.imageGenEnabled && imageGenEngine != null &&
-            imageGenEngine?.state?.value?.mode == ImageGenEngine.Mode.READY) {
-            if (toolDescs.isNotEmpty()) toolDescs.add("")
-            toolDescs.add("IMAGE GENERATION TOOL:")
-            toolDescs.add("""generate_image: {"name":"generate_image","prompt":"a detailed description of the image","negative_prompt":"things to avoid","width":512,"height":512,"steps":20,"cfg_scale":7.0,"seed":-1}""")
-            toolDescs.add("  - prompt: detailed description of the image to generate (required)")
-            toolDescs.add("  - negative_prompt: things to avoid in the image (optional, default: empty)")
-            toolDescs.add("  - width/height: 256-2048 pixels (optional, default: 512)")
-            toolDescs.add("  - steps: 1-50, higher = more detail but slower (optional, default: 20)")
-            toolDescs.add("  - cfg_scale: 1.0-30.0, higher = follows prompt more strictly (optional, default: 7.0)")
-            toolDescs.add("  - seed: random seed, -1 for random (optional, default: -1)")
-        }
-
         if (toolDescs.isNotEmpty()) {
             parts.add("")
             parts.addAll(toolDescs)
@@ -293,21 +255,13 @@ class MainActivity : AppCompatActivity() {
         val content = layoutInflater.inflate(R.layout.dialog_tool_settings, null)
         val allToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_all_tools)
         val sandboxToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_sandbox)
-        val imageGenToggle = content.findViewById<MaterialCheckBox>(R.id.toggle_image_gen)
-        val imageGenSection = content.findViewById<View>(R.id.image_gen_section)
 
         allToggle.isChecked = toolSettings.allToolsEnabled
         sandboxToggle.isChecked = toolSettings.sandboxToolsEnabled
-        imageGenToggle.isChecked = toolSettings.imageGenEnabled
-
-        if (imageGenEngine == null || imageGenEngine?.state?.value?.mode == ImageGenEngine.Mode.ERROR) {
-            imageGenSection.visibility = View.GONE
-        }
 
         fun applyChildEnabled() {
             val enabled = allToggle.isChecked
             sandboxToggle.isEnabled = enabled
-            imageGenToggle.isEnabled = enabled && imageGenSection.visibility == View.VISIBLE
         }
         applyChildEnabled()
 
@@ -316,7 +270,6 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnDismissListener {
             toolSettings.allToolsEnabled = allToggle.isChecked
             toolSettings.sandboxToolsEnabled = sandboxToggle.isChecked
-            toolSettings.imageGenEnabled = imageGenToggle.isChecked
         }
 
         dialog.setContentView(content)
@@ -405,154 +358,6 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun showImageGeneration() {
-        val dialog = BottomSheetDialog(this)
-        val content = layoutInflater.inflate(R.layout.dialog_image_gen, null)
-        val statusTv = content.findViewById<TextView>(R.id.sd_model_status)
-        val promptEt = content.findViewById<TextInputEditText>(R.id.image_gen_prompt)
-        val negativeEt = content.findViewById<TextInputEditText>(R.id.image_gen_negative)
-        val stepsSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.image_gen_steps)
-        val cfgSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.image_gen_cfg)
-        val seedEt = content.findViewById<TextInputEditText>(R.id.image_gen_seed)
-        val generateBtn = content.findViewById<MaterialButton>(R.id.generate_button)
-        val progress = content.findViewById<ProgressBar>(R.id.gen_progress)
-        val statusTv2 = content.findViewById<TextView>(R.id.gen_status)
-        val genImage = content.findViewById<ImageView>(R.id.gen_image)
-        val resultInfo = content.findViewById<TextView>(R.id.gen_result_info)
-        val loadBtn = content.findViewById<MaterialButton>(R.id.load_sd_model)
-        val sq512 = content.findViewById<MaterialButton>(R.id.size_sq_512)
-        val landscape = content.findViewById<MaterialButton>(R.id.size_landscape)
-        val portrait = content.findViewById<MaterialButton>(R.id.size_portrait)
-        val hd = content.findViewById<MaterialButton>(R.id.size_hd)
-
-        var width = 512
-        var height = 512
-        var generating = false
-        var generationJob: Job? = null
-
-        val sizeLabel = content.findViewById<TextView>(R.id.size_label)!!
-
-        fun setSize(w: Int, h: Int) { width = w; height = h; sizeLabel.text = "Size: ${w}×${h}" }
-
-        sq512.setOnClickListener { setSize(512, 512) }
-        landscape.setOnClickListener { setSize(768, 512) }
-        portrait.setOnClickListener { setSize(512, 768) }
-        hd.setOnClickListener { setSize(1024, 1024) }
-        setSize(512, 512)
-
-        stepsSlider.addOnChangeListener { _, value, _ ->
-            content.findViewById<TextView>(R.id.steps_label).text = "Steps: ${value.toInt()}"
-        }
-        cfgSlider.addOnChangeListener { _, value, _ ->
-            content.findViewById<TextView>(R.id.cfg_label).text = "CFG Scale: ${String.format(Locale.US, "%.1f", value)}"
-        }
-        stepsSlider.value = 20f
-        cfgSlider.value = 7.0f
-
-        fun refreshStatus() {
-            val engine = imageGenEngine
-            when {
-                engine == null -> {
-                    statusTv.text = "Image generation not available"
-                    generateBtn.isEnabled = false
-                    loadBtn.visibility = View.GONE
-                }
-                engine.state.value.mode == ImageGenEngine.Mode.ERROR -> {
-                    statusTv.text = "Error: ${engine.state.value.error ?: "unknown"}"
-                    generateBtn.isEnabled = false
-                    loadBtn.visibility = View.GONE
-                }
-                engine.state.value.mode == ImageGenEngine.Mode.GENERATING -> {
-                    statusTv.text = "Generating..."
-                    generateBtn.isEnabled = false
-                    loadBtn.visibility = View.GONE
-                }
-                engine.state.value.mode == ImageGenEngine.Mode.READY -> {
-                    statusTv.text = "Model ready"
-                    generateBtn.isEnabled = !generating
-                    loadBtn.visibility = View.GONE
-                }
-                engine.state.value.mode == ImageGenEngine.Mode.LOADING -> {
-                    statusTv.text = "Loading model..."
-                    generateBtn.isEnabled = false
-                    loadBtn.visibility = View.GONE
-                }
-                engine.state.value.mode == ImageGenEngine.Mode.UNLOADED -> {
-                    statusTv.text = "No image generation model loaded"
-                    generateBtn.isEnabled = false
-                    loadBtn.visibility = View.VISIBLE
-                }
-            }
-        }
-        refreshStatus()
-
-        val stateJob = lifecycleScope.launch {
-            imageGenEngine?.state?.collect {
-                withContext(Dispatchers.Main) { refreshStatus() }
-            }
-        }
-        dialog.setOnDismissListener {
-            stateJob.cancel()
-            generationJob?.cancel()
-        }
-
-        generateBtn.setOnClickListener {
-            val prompt = promptEt.text?.toString()?.trim()
-            if (prompt.isNullOrBlank() || generating) return@setOnClickListener
-
-            generating = true
-            generateBtn.isEnabled = false
-            progress.visibility = View.VISIBLE
-            progress.isIndeterminate = true
-            statusTv2.visibility = View.VISIBLE
-            statusTv2.text = "Generating..."
-            genImage.visibility = View.GONE
-            resultInfo.visibility = View.GONE
-
-            generationJob = lifecycleScope.launch {
-                try {
-                    val seed = seedEt.text?.toString()?.trim()?.toLongOrNull() ?: -1L
-                    val negative = negativeEt.text?.toString()?.trim() ?: ""
-                    val steps = stepsSlider.value.toInt()
-                    val cfg = cfgSlider.value
-
-                    val result = withContext(Dispatchers.IO) {
-                        imageGenEngine?.generateImage(prompt, negative, width, height, steps, cfg, seed)
-                    }
-
-                    if (result != null) {
-                        val file = File(result)
-                        val bitmap = android.graphics.BitmapFactory.decodeFile(result)
-                        if (bitmap != null) {
-                            genImage.setImageBitmap(bitmap)
-                            genImage.visibility = View.VISIBLE
-                            resultInfo.text = "${width}×${height} | ${file.length() / 1024}KB | seed=${seed}"
-                            resultInfo.visibility = View.VISIBLE
-                            statusTv2.text = "Done"
-                        } else {
-                            statusTv2.text = "Failed to decode image"
-                        }
-                    } else {
-                        statusTv2.text = "Generation failed"
-                    }
-                } catch (e: CancellationException) {
-                    statusTv2.text = "Cancelled"
-                } catch (e: Exception) {
-                    statusTv2.text = "Error: ${e.message}"
-                } finally {
-                    generating = false
-                    progress.visibility = View.GONE
-                    generateBtn.isEnabled = true
-                }
-            }
-        }
-
-        loadBtn.setOnClickListener { showModelManager() }
-
-        dialog.setContentView(content)
-        dialog.show()
-    }
-
     private fun restoreConversations() {
         conversations += chatStore.loadConversations()
         val selectedId = chatStore.selectedConversationId()
@@ -591,19 +396,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 } ?: uri.lastPathSegment ?: "model.bin"
 
-                val isSafetensors = fileName.endsWith(".safetensors", ignoreCase = true)
-
                 val modelFile = withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)?.use { input ->
                         ensureModelFile(sanitizeModelName(fileName), input)
                     } ?: error("Unable to copy the selected model")
                 }
 
-                val detectedType = modelRepository.detectModelType(modelFile)
-                when (detectedType) {
-                    ModelType.IMAGE_GEN -> loadImageGenModel(modelFile)
-                    else -> loadModel(modelFile.name, modelFile)
-                }
+                loadModel(modelFile.name, modelFile)
             } catch (exception: Exception) {
                 Log.e(TAG, "Unable to import model", exception)
                 showToast(getString(R.string.model_load_failed))
@@ -634,7 +433,6 @@ class MainActivity : AppCompatActivity() {
         try {
             withContext(Dispatchers.IO) {
                 val inferenceEngine = requireNotNull(engine) { "Inference engine is not ready" }
-                runCatching { imageGenEngine?.unload() }
                 if (inferenceEngine.state.value.isModelLoaded) {
                     inferenceEngine.cleanUp()
                 }
@@ -659,23 +457,6 @@ class MainActivity : AppCompatActivity() {
             isModelReady = false
             chatStore.clearLastModelName()
             refreshUi()
-            showToast(getString(R.string.model_load_failed))
-        }
-    }
-
-    private suspend fun loadImageGenModel(modelFile: File) {
-        setModelLoadingUi(getString(R.string.tool_image_gen_loading))
-        try {
-            withContext(Dispatchers.IO) {
-                runCatching { engine?.cleanUp() }
-                isModelReady = false
-                selectedModelName = null
-                chatStore.clearLastModelName()
-                imageGenEngine?.loadModel(modelFile.path)
-            }
-            refreshUi()
-        } catch (exception: Exception) {
-            Log.e(TAG, "Unable to load image gen model", exception)
             showToast(getString(R.string.model_load_failed))
         }
     }
@@ -931,32 +712,20 @@ class MainActivity : AppCompatActivity() {
     private fun parseAnyToolCall(response: String): ToolCall? {
         val sandbox = sandboxTools.parseToolCall(response)
         if (sandbox != null) return ToolCall.Sandbox(sandbox)
-        val imgTool = imageGenTool
-        if (toolSettings.imageGenEnabled && imgTool != null) {
-            val imgGen = imgTool.parseToolCall(response)
-            if (imgGen != null) return ToolCall.ImageGen(imgGen)
-        }
         return null
     }
 
     private fun extractAnyToolJson(response: String): String? {
         sandboxTools.extractToolJson(response)?.let { return it }
-        val imgTool = imageGenTool
-        if (toolSettings.imageGenEnabled && imgTool != null) {
-            imgTool.extractImageGenJson(response)?.let { return it }
-        }
         return null
     }
 
     private suspend fun executeToolCall(call: ToolCall): String = when (call) {
         is ToolCall.Sandbox -> sandboxTools.execute(call.call)
-        is ToolCall.ImageGen -> imageGenTool?.execute(call.call) ?: "ERROR: Image generation is not available"
     }
 
     private fun toolResultPrompt(call: ToolCall, result: String): String = when (call) {
         is ToolCall.Sandbox -> sandboxTools.toolResultPrompt(call.call, result)
-        is ToolCall.ImageGen -> imageGenTool?.toolResultPrompt(call.call, result)
-            ?: "<tool_result>$result</tool_result>"
     }
 
     private fun showConversationHistory() {
@@ -1070,10 +839,7 @@ class MainActivity : AppCompatActivity() {
                     return@LocalModelAdapter
                 }
                 dialog.dismiss()
-                when (localModel.type) {
-                    ModelType.IMAGE_GEN -> lifecycleScope.launch { loadImageGenModel(localModel.file) }
-                    else -> lifecycleScope.launch { loadModel(localModel.file.name, localModel.file) }
-                }
+                lifecycleScope.launch { loadModel(localModel.file.name, localModel.file) }
             },
             onDelete = { modelFile ->
                 confirmDeleteModel(modelFile) {
@@ -1136,7 +902,6 @@ class MainActivity : AppCompatActivity() {
                         withContext(Dispatchers.IO) {
                             if (wasLoaded) {
                                 if (engine?.state?.value?.isModelLoaded == true) engine?.cleanUp()
-                                if (imageGenEngine?.state?.value?.mode == ImageGenEngine.Mode.READY) imageGenEngine?.unload()
                             }
                             modelFile.delete()
                         }
@@ -1339,7 +1104,6 @@ class MainActivity : AppCompatActivity() {
         speechJob?.cancel()
         speechRecognizer.close()
         unloadAllModels()
-        runCatching { imageGenEngine?.destroy() }
         runCatching { engine?.destroy() }
         super.onDestroy()
     }
@@ -1358,10 +1122,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun unloadAllModels() {
-        runCatching {
-            imageGenEngine?.cancelGeneration()
-            imageGenEngine?.unload()
-        }
         runCatching { engine?.cleanUp() }
         selectedModelName = null
         isModelReady = false

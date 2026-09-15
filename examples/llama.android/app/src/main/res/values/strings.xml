@@ -86,7 +86,5 @@
     <string name="reload_model_to_apply">Reload the model to apply context / KV changes.</string>
     <string name="all_tools">Enable all tools</string>
     <string name="tool_sandbox_files">Sandbox file tools</string>
-    <string name="tool_image_gen">Image generation</string>
-    <string name="tool_image_gen_loading">Loading image gen model...</string>
     <string name="unload_model">Unload model</string>
 </resources>
