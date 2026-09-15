@@ -1,5 +1,6 @@
 package com.example.llama
 
+import android.text.method.LinkMovementMethod
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -7,6 +8,7 @@ import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import java.text.DateFormat
 import java.util.Date
@@ -49,12 +51,20 @@ class MessageAdapter(
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val message = messages[position]
+        val context = holder.itemView.context
+        val assistantLink = ContextCompat.getColor(context, R.color.brand_primary)
         if (holder is UserMessageViewHolder) {
-            holder.itemView.findViewById<TextView>(R.id.msg_content).text = MarkdownRenderer.render(message.content)
+            val contentView = holder.itemView.findViewById<TextView>(R.id.msg_content)
+            contentView.text = MarkdownRenderer.render(
+                message.content,
+                ContextCompat.getColor(context, R.color.brand_primary_container)
+            )
+            contentView.movementMethod = LinkMovementMethod.getInstance()
             holder.itemView.findViewById<TextView>(R.id.msg_time).text =
                 DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.timestamp))
         } else if (holder is AssistantMessageViewHolder) {
-            holder.msgContent.text = MarkdownRenderer.render(message.content)
+            holder.msgContent.text = MarkdownRenderer.render(message.content, assistantLink)
+            holder.msgContent.movementMethod = LinkMovementMethod.getInstance()
             holder.msgContent.visibility = if (message.content.isBlank()) View.GONE else View.VISIBLE
             holder.msgTime.text =
                 DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.timestamp))
@@ -62,7 +72,8 @@ class MessageAdapter(
             if (message.thinking.isNotBlank()) {
                 Log.d("MsgAdapter", "bind thinking id=${message.id} len=${message.thinking.length}")
                 holder.thinkingContainer.visibility = View.VISIBLE
-                holder.thinkingText.text = MarkdownRenderer.render(message.thinking)
+                holder.thinkingText.text = MarkdownRenderer.render(message.thinking, assistantLink)
+                holder.thinkingText.movementMethod = LinkMovementMethod.getInstance()
                 val isExpanded = expandedThinking.contains(message.id)
                 holder.thinkingText.visibility = if (isExpanded) View.VISIBLE else View.GONE
                 holder.thinkingChevron.rotation = if (isExpanded) 180f else 0f
@@ -84,7 +95,8 @@ class MessageAdapter(
 
             if (message.tooling.isNotBlank()) {
                 holder.toolingContainer.visibility = View.VISIBLE
-                holder.toolingText.text = MarkdownRenderer.render(message.tooling)
+                holder.toolingText.text = MarkdownRenderer.render(message.tooling, assistantLink)
+                holder.toolingText.movementMethod = LinkMovementMethod.getInstance()
                 val isExpanded = expandedTooling.contains(message.id)
                 holder.toolingText.visibility = if (isExpanded) View.VISIBLE else View.GONE
                 holder.toolingChevron.rotation = if (isExpanded) 180f else 0f
