@@ -59,9 +59,10 @@ interface InferenceEngine {
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String
 
     /**
-     * Unloads the currently loaded model.
+     * Unloads the currently loaded model. Suspends instead of blocking
+     * the caller, so it is safe to call from the main thread's scope.
      */
-    fun cleanUp()
+    suspend fun cleanUp()
 
     /**
      * Cleans up resources when the engine is no longer needed.

@@ -429,6 +429,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     private suspend fun loadModel(modelName: String, modelFile: File) {
+        stopGeneration()
         setModelLoadingUi(getString(R.string.loading_model))
         try {
             withContext(Dispatchers.IO) {
@@ -839,6 +840,7 @@ class MainActivity : AppCompatActivity() {
                     return@LocalModelAdapter
                 }
                 dialog.dismiss()
+                stopGeneration()
                 lifecycleScope.launch { loadModel(localModel.file.name, localModel.file) }
             },
             onDelete = { modelFile ->
@@ -896,6 +898,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(getString(R.string.confirm_delete_model, modelFile.name))
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.delete) { _, _ ->
+                stopGeneration()
                 lifecycleScope.launch {
                     val wasLoaded = modelFile.name == selectedModelName
                     val deleted = runCatching {
@@ -1102,8 +1105,10 @@ class MainActivity : AppCompatActivity() {
         modelDownloadJob?.cancel()
         repositoryIndexJob?.cancel()
         speechJob?.cancel()
+        generationJob?.cancel()
+        stopGeneration()
         speechRecognizer.close()
-        unloadAllModels()
+        // destroy() unloads the model itself, so no separate unload here
         runCatching { engine?.destroy() }
         super.onDestroy()
     }
@@ -1122,10 +1127,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun unloadAllModels() {
-        runCatching { engine?.cleanUp() }
-        selectedModelName = null
-        isModelReady = false
-        refreshUi()
+        stopGeneration()
+        lifecycleScope.launch {
+            runCatching { engine?.cleanUp() }
+            selectedModelName = null
+            isModelReady = false
+            refreshUi()
+        }
     }
 
     companion object {

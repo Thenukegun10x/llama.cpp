@@ -166,11 +166,13 @@ internal class InferenceEngineImpl private constructor(
             nativeUpdateSampling(temp, topK, topP, penaltyRepeat)
         }
 
-    override suspend fun contextUsage(): Pair<Int, Int> =
-        withContext(llamaDispatcher) {
-            val vals = nativeContextUsage()
-            Pair(vals.getOrElse(0) { 0 }, vals.getOrElse(1) { 0 })
-        }
+    // Plain getter over two aligned ints, safe to run on any thread even
+    // while a decode step owns the engine thread. Routing this via
+    // llamaDispatcher would queue behind generation and freeze readers.
+    override suspend fun contextUsage(): Pair<Int, Int> {
+        val vals = nativeContextUsage()
+        return Pair(vals.getOrElse(0) { 0 }, vals.getOrElse(1) { 0 })
+    }
 
     override suspend fun loadModel(pathToModel: String) =
         withContext(llamaDispatcher) {
@@ -308,11 +310,13 @@ internal class InferenceEngineImpl private constructor(
     }
 
     /**
-     * Unloads the model and frees resources, or reset error states
+     * Unloads the model and frees resources, or reset error states.
+     * Queues on the single engine thread instead of blocking the caller,
+     * so unloading while a token is decoding no longer freezes the app.
      */
-    override fun cleanUp() {
-        _cancelGeneration = true
-        runBlocking(llamaDispatcher) {
+    override suspend fun cleanUp() =
+        withContext(llamaDispatcher) {
+            _cancelGeneration = true
             when (val state = _state.value) {
                 is InferenceEngine.State.ModelReady -> {
                     Log.i(TAG, "Unloading model and free resources...")
@@ -336,7 +340,6 @@ internal class InferenceEngineImpl private constructor(
                 else -> throw IllegalStateException("Cannot unload model in ${state.javaClass.simpleName}")
             }
         }
-    }
 
     /**
      * Cancel all ongoing coroutines and free GGML backends
