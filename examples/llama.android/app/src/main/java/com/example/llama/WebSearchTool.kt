@@ -3,6 +3,9 @@ package com.example.llama
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
 import java.net.InetAddress
 import java.net.URL
 import java.net.URLDecoder
@@ -177,11 +180,208 @@ class WebSearchTool {
         return extractArticleText(doc).take(maxChars)
     }
 
-    // Pure: drop boilerplate, prefer article/main, squash whitespace.
+    // Pure: drop boilerplate, prefer article/main, convert HTML to clean Markdown.
     internal fun extractArticleText(doc: Document): String {
-        doc.select("script, style, noscript, header, footer, nav, aside, form, iframe").remove()
-        val scope = doc.selectFirst("article, main, [role=main]") ?: doc.body() ?: return ""
-        return scope.text().replace(Regex("\\s+"), " ").trim()
+        doc.select("script, style, noscript, header, footer, nav, aside, form, iframe, svg, canvas").remove()
+        val scope = doc.selectFirst("article, main, [role=main]") ?: doc.body()
+        return htmlToMarkdown(scope)
+    }
+
+    internal fun htmlToMarkdown(root: Element): String {
+        val sb = StringBuilder()
+        renderNode(root, sb, RenderState())
+        return cleanMarkdown(sb.toString())
+    }
+
+    private data class RenderState(
+        val inPre: Boolean = false,
+        val inTable: Boolean = false
+    )
+
+    private fun renderNode(node: Node, sb: StringBuilder, state: RenderState) {
+        when (node) {
+            is TextNode -> {
+                if (state.inPre) {
+                    sb.append(node.wholeText)
+                } else {
+                    val text = node.text()
+                    if (text.isNotBlank()) {
+                        val collapsed = text.replace(Regex("\\s+"), " ")
+                        sb.append(collapsed)
+                    } else if (text.isNotEmpty() && (text.contains(' ') || text.contains('\n') || text.contains('\t'))) {
+                        if (sb.isNotEmpty() && sb.last() != ' ' && sb.last() != '\n') {
+                            sb.append(' ')
+                        }
+                    }
+                }
+            }
+            is Element -> {
+                when (node.normalName()) {
+                    "h1" -> renderHeading(node, sb, state, "# ")
+                    "h2" -> renderHeading(node, sb, state, "## ")
+                    "h3" -> renderHeading(node, sb, state, "### ")
+                    "h4" -> renderHeading(node, sb, state, "#### ")
+                    "h5" -> renderHeading(node, sb, state, "##### ")
+                    "h6" -> renderHeading(node, sb, state, "###### ")
+                    "p" -> {
+                        ensureNewlines(sb, 2)
+                        renderChildren(node, sb, state)
+                        ensureNewlines(sb, 2)
+                    }
+                    "br" -> sb.append("\n")
+                    "hr" -> {
+                        ensureNewlines(sb, 2)
+                        sb.append("---")
+                        ensureNewlines(sb, 2)
+                    }
+                    "blockquote" -> {
+                        ensureNewlines(sb, 2)
+                        val inner = StringBuilder()
+                        renderChildren(node, inner, state)
+                        val quoted = inner.toString().trim().lines().joinToString("\n") { "> $it" }
+                        sb.append(quoted)
+                        ensureNewlines(sb, 2)
+                    }
+                    "ul" -> {
+                        ensureNewlines(sb, 2)
+                        for (li in node.children()) {
+                            if (li.normalName() == "li") {
+                                ensureNewlines(sb, 1)
+                                sb.append("- ")
+                                renderChildren(li, sb, state)
+                            } else {
+                                renderNode(li, sb, state)
+                            }
+                        }
+                        ensureNewlines(sb, 2)
+                    }
+                    "ol" -> {
+                        ensureNewlines(sb, 2)
+                        var index = 1
+                        for (li in node.children()) {
+                            if (li.normalName() == "li") {
+                                ensureNewlines(sb, 1)
+                                sb.append("$index. ")
+                                renderChildren(li, sb, state)
+                                index++
+                            } else {
+                                renderNode(li, sb, state)
+                            }
+                        }
+                        ensureNewlines(sb, 2)
+                    }
+                    "pre" -> {
+                        ensureNewlines(sb, 2)
+                        sb.append("```\n")
+                        renderChildren(node, sb, state.copy(inPre = true))
+                        if (!sb.endsWith("\n")) sb.append("\n")
+                        sb.append("```")
+                        ensureNewlines(sb, 2)
+                    }
+                    "code" -> {
+                        if (state.inPre) {
+                            renderChildren(node, sb, state)
+                        } else {
+                            val inner = StringBuilder()
+                            renderChildren(node, inner, state)
+                            val codeText = inner.toString().trim()
+                            if (codeText.isNotEmpty()) {
+                                sb.append("`").append(codeText).append("`")
+                            }
+                        }
+                    }
+                    "strong", "b" -> {
+                        val inner = StringBuilder()
+                        renderChildren(node, inner, state)
+                        val content = inner.toString().trim()
+                        if (content.isNotEmpty()) {
+                            sb.append("**").append(content).append("**")
+                        }
+                    }
+                    "em", "i" -> {
+                        val inner = StringBuilder()
+                        renderChildren(node, inner, state)
+                        val content = inner.toString().trim()
+                        if (content.isNotEmpty()) {
+                            sb.append("*").append(content).append("*")
+                        }
+                    }
+                    "a" -> {
+                        val href = node.attr("abs:href").ifBlank { node.attr("href") }.trim()
+                        val inner = StringBuilder()
+                        renderChildren(node, inner, state)
+                        val linkText = inner.toString().trim()
+                        if (linkText.isNotEmpty()) {
+                            if (href.startsWith("http://") || href.startsWith("https://")) {
+                                if (linkText.equals(href, ignoreCase = true)) {
+                                    sb.append(href)
+                                } else {
+                                    sb.append("[").append(linkText).append("](").append(href).append(")")
+                                }
+                            } else {
+                                sb.append(linkText)
+                            }
+                        }
+                    }
+                    "table" -> renderTable(node, sb, state)
+                    else -> renderChildren(node, sb, state)
+                }
+            }
+        }
+    }
+
+    private fun renderHeading(element: Element, sb: StringBuilder, state: RenderState, prefix: String) {
+        ensureNewlines(sb, 2)
+        sb.append(prefix)
+        renderChildren(element, sb, state)
+        ensureNewlines(sb, 2)
+    }
+
+    private fun renderChildren(node: Node, sb: StringBuilder, state: RenderState) {
+        for (child in node.childNodes()) {
+            renderNode(child, sb, state)
+        }
+    }
+
+    private fun renderTable(table: Element, sb: StringBuilder, state: RenderState) {
+        val rows = table.select("tr")
+        if (rows.isEmpty()) return
+        ensureNewlines(sb, 2)
+        var headerRendered = false
+        for ((rowIndex, row) in rows.withIndex()) {
+            val cells = row.select("th, td")
+            if (cells.isEmpty()) continue
+            val rowText = cells.joinToString(" | ") { cell ->
+                val inner = StringBuilder()
+                renderChildren(cell, inner, state.copy(inTable = true))
+                inner.toString().replace("|", "\\|").replace("\n", " ").trim()
+            }
+            sb.append("| ").append(rowText).append(" |\n")
+            if (rowIndex == 0 && (row.select("th").isNotEmpty() || !headerRendered)) {
+                val sep = cells.joinToString(" | ") { "---" }
+                sb.append("| ").append(sep).append(" |\n")
+                headerRendered = true
+            }
+        }
+        ensureNewlines(sb, 2)
+    }
+
+    private fun ensureNewlines(sb: StringBuilder, count: Int) {
+        var existing = 0
+        while (existing < sb.length && sb[sb.length - 1 - existing] == '\n') {
+            existing++
+        }
+        repeat(count - existing) {
+            sb.append('\n')
+        }
+    }
+
+    private fun cleanMarkdown(raw: String): String {
+        return raw.lines()
+            .map { it.trimEnd() }
+            .joinToString("\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
     }
 
     internal fun normalizeHttpUrl(raw: String): String {

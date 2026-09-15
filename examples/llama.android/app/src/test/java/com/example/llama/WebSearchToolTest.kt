@@ -100,13 +100,57 @@ class WebSearchToolTest {
     }
 
     @Test
-    fun extractArticleTextDropsBoilerplate() {
+    fun extractArticleTextConvertsHtmlToMarkdown() {
         val doc = Jsoup.parse(
             "<html><body><nav>menu</nav><script>var x = 1;</script>" +
-                "<article><h1>Headline</h1><p>Body text here.</p></article>" +
+                "<article>" +
+                "<h1>Headline</h1>" +
+                "<p>Body text with <strong>bold</strong>, <em>italic</em>, and <code>code</code>.</p>" +
+                "<h2>Features</h2>" +
+                "<ul><li>Item 1</li><li>Item 2</li></ul>" +
+                "<p>Visit <a href=\"https://example.com/docs\">documentation</a> for more.</p>" +
+                "<pre><code>val x = 42\nprintln(x)</code></pre>" +
+                "</article>" +
                 "<footer>copy</footer></body></html>"
         )
-        assertEquals("Headline Body text here.", tool.extractArticleText(doc))
+        val md = tool.extractArticleText(doc)
+        val expected = """
+            # Headline
+
+            Body text with **bold**, *italic*, and `code`.
+
+            ## Features
+
+            - Item 1
+            - Item 2
+
+            Visit [documentation](https://example.com/docs) for more.
+
+            ```
+            val x = 42
+            println(x)
+            ```
+        """.trimIndent()
+        assertEquals(expected, md)
+    }
+
+    @Test
+    fun htmlToMarkdownConvertsTables() {
+        val doc = Jsoup.parse(
+            "<table>" +
+                "<tr><th>Name</th><th>Price</th></tr>" +
+                "<tr><td>Apple</td><td>$1</td></tr>" +
+                "<tr><td>Banana</td><td>$2</td></tr>" +
+                "</table>"
+        )
+        val md = tool.extractArticleText(doc)
+        val expected = """
+            | Name | Price |
+            | --- | --- |
+            | Apple | $1 |
+            | Banana | $2 |
+        """.trimIndent()
+        assertEquals(expected, md)
     }
 
     @Test
