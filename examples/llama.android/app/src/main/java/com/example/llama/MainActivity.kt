@@ -693,6 +693,14 @@ class MainActivity : AppCompatActivity() {
                 thinking = afterOpen.trim()
                 working = prefix
             }
+        } else {
+            // Fallback: If <think> was prefilled into the prompt by the model's chat template,
+            // the generated response starts directly with thinking and ends with </think>
+            val close = working.indexOf(THINK_CLOSE)
+            if (close >= 0) {
+                thinking = working.substring(0, close).trim()
+                working = working.substring(close + THINK_CLOSE.length)
+            }
         }
         val tooling = extractAnyToolJson(working) ?: ""
         val answer = if (tooling.isNotBlank()) working.replace(tooling, "").trim() else working.trim()

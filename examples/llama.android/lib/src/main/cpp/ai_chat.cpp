@@ -385,11 +385,13 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
 static llama_pos stop_generation_position;
 static std::string cached_token_chars;
 static std::ostringstream assistant_ss;
+static bool g_prompt_ends_with_think = false;
 
 static void reset_short_term_states() {
     stop_generation_position = 0;
     cached_token_chars.clear();
     assistant_ss.str("");
+    g_prompt_ends_with_think = false;
 }
 
 // Returns int[2] = {tokens currently in context, context size}.
@@ -516,6 +518,19 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     }
     env->ReleaseStringUTFChars(juser_prompt, user_prompt);
 
+    // If chat template prefilled <think> at the end of the prompt, the model will generate
+    // the thought body directly without emitting <think>. Flag this to emit <think>\n to stream.
+    {
+        std::string trimmed = formatted_user_prompt;
+        while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\n' || trimmed.back() == '\r' || trimmed.back() == '\t')) {
+            trimmed.pop_back();
+        }
+        if (trimmed.size() >= 7 && trimmed.substr(trimmed.size() - 7) == "<think>") {
+            g_prompt_ends_with_think = true;
+            LOGi("%s: Chat template prefilled <think>, will emit to stream", __func__);
+        }
+    }
+
     // Decode formatted user prompts
     auto user_tokens = common_tokenize(g_context, formatted_user_prompt, has_chat_template, has_chat_template);
     for (auto id: user_tokens) {
@@ -583,6 +598,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         JNIEnv *env,
         jobject /*unused*/
 ) {
+    if (g_prompt_ends_with_think) {
+        g_prompt_ends_with_think = false;
+        assistant_ss << "<think>\n";
+        return env->NewStringUTF("<think>\n");
+    }
+
     // Infinite text generation via context shifting
     if (current_position >= g_n_ctx - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
