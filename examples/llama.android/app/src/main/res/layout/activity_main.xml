@@ -95,6 +95,36 @@
             android:max="100" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/ram_tracker"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="2dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/ctx_tracker">
+
+        <TextView
+            android:id="@+id/ram_usage"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
+            android:textColor="?attr/colorOnSurfaceVariant" />
+
+        <ProgressBar
+            android:id="@+id/ram_bar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="96dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:max="100" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/empty_state"
         android:layout_width="0dp"
@@ -109,7 +139,7 @@
         app:layout_constraintBottom_toTopOf="@id/composer"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/ctx_tracker" />
+        app:layout_constraintTop_toBottomOf="@id/ram_tracker" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/messages"
@@ -122,7 +152,7 @@
         app:layout_constraintBottom_toTopOf="@id/composer"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/ctx_tracker" />
+        app:layout_constraintTop_toBottomOf="@id/ram_tracker" />
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/composer"

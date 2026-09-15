@@ -1,8 +1,11 @@
 package com.example.llama
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.ComponentCallbacks2
+import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -39,8 +42,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -69,6 +74,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ctxTracker: View
     private lateinit var ctxUsageTv: TextView
     private lateinit var ctxBar: ProgressBar
+    private lateinit var ramTracker: View
+    private lateinit var ramUsageTv: TextView
+    private lateinit var ramBar: ProgressBar
     private lateinit var chatStore: ConversationStore
     private lateinit var sandboxTools: SandboxFileTools
     private lateinit var webSearchTools: WebSearchTool
@@ -122,6 +130,10 @@ class MainActivity : AppCompatActivity() {
         ctxTracker = findViewById(R.id.ctx_tracker)
         ctxUsageTv = findViewById(R.id.ctx_usage)
         ctxBar = findViewById(R.id.ctx_bar)
+        ramTracker = findViewById(R.id.ram_tracker)
+        ramUsageTv = findViewById(R.id.ram_usage)
+        ramBar = findViewById(R.id.ram_bar)
+        startRamTracker()
 
         messagesRv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         messagesRv.adapter = messageAdapter
@@ -1076,6 +1088,7 @@ class MainActivity : AppCompatActivity() {
         userActionBtn.isEnabled = false
         micButton.isEnabled = false
         changeModelBtn.isEnabled = false
+        ramTracker.visibility = View.VISIBLE
     }
 
     private fun updateCtxTracker() {
@@ -1096,6 +1109,43 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun startRamTracker() {
+        lifecycleScope.launch {
+            val actManager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            while (isActive) {
+                updateRamTracker(actManager, memInfo)
+                delay(2500)
+            }
+        }
+    }
+
+    private fun updateRamTracker(actManager: ActivityManager?, memInfo: ActivityManager.MemoryInfo) {
+        if (actManager == null) return
+        actManager.getMemoryInfo(memInfo)
+        val totalBytes = memInfo.totalMem
+        val availBytes = memInfo.availMem
+        val usedBytes = (totalBytes - availBytes).coerceAtLeast(0)
+        val totalGB = totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val usedGB = usedBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val freeGB = availBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val usedPercent = if (totalBytes > 0) ((usedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100) else 0
+
+        ramUsageTv.text = getString(R.string.ram_usage, usedGB, totalGB, freeGB)
+        ramBar.progress = usedPercent
+
+        if (memInfo.lowMemory || usedPercent >= 90) {
+            ramUsageTv.setTextColor(getColor(android.R.color.holo_red_dark))
+            ramBar.progressTintList = ColorStateList.valueOf(getColor(android.R.color.holo_red_dark))
+        } else if (usedPercent >= 80) {
+            ramUsageTv.setTextColor(getColor(android.R.color.holo_orange_dark))
+            ramBar.progressTintList = ColorStateList.valueOf(getColor(android.R.color.holo_orange_dark))
+        } else {
+            ramUsageTv.setTextColor(getColor(R.color.model_status_text))
+            ramBar.progressTintList = null
+        }
+    }
+
     private fun refreshUi() {
         modelStatusTv.text = when {
             !engineReady -> getString(R.string.engine_starting)
@@ -1103,6 +1153,7 @@ class MainActivity : AppCompatActivity() {
             else -> getString(R.string.no_model_selected)
         }
         ctxTracker.visibility = if (isModelReady) View.VISIBLE else View.GONE
+        ramTracker.visibility = if (isModelReady) View.VISIBLE else View.GONE
         val generationActive = generationJob?.isActive == true
         userInputEt.isEnabled = engineReady && !generationActive && !isGenerating
         changeModelBtn.isEnabled = engineReady && generationJob?.isActive != true
