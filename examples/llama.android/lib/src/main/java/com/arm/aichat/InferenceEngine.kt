@@ -45,6 +45,13 @@ interface InferenceEngine {
     suspend fun setSystemPrompt(systemPrompt: String)
 
     /**
+     * Replays stored conversation turns into the context, in order. Call after [setSystemPrompt].
+     *
+     * @param historyJson JSON array of {"role":"user"|"assistant","content":"..."}
+     */
+    suspend fun processHistory(historyJson: String)
+
+    /**
      * Set tools JSON schema (OpenAI format). Enables native template tool formatting and parsing.
      */
     suspend fun setTools(toolsJson: String)

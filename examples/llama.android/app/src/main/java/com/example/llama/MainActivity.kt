@@ -38,6 +38,7 @@ import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import android.view.ViewGroup
+import org.json.JSONArray
 import org.json.JSONObject
 
 import kotlinx.coroutines.CancellationException
@@ -96,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private var modelDownloadJob: Job? = null
     private var repositoryIndexJob: Job? = null
     private var speechJob: Job? = null
+    private var historySyncJob: Job? = null
     private var nativeToolsSupported = false
 
     private val requestMicrophonePermission = registerForActivityResult(
@@ -512,6 +514,8 @@ class MainActivity : AppCompatActivity() {
                 nativeToolsSupported = inferenceEngine.hasNativeToolSupport()
                 Log.i(TAG, "Model loaded: nativeToolsSupported=$nativeToolsSupported")
                 inferenceEngine.setSystemPrompt(buildSystemPrompt())
+                val historyJson = buildHistoryJson(messages)
+                if (historyJson != "[]") inferenceEngine.processHistory(historyJson)
             }
             selectedModelName = modelName
             chatStore.saveLastModelName(modelName)
@@ -632,6 +636,7 @@ class MainActivity : AppCompatActivity() {
         saveConversationHistory()
 
         generationJob = lifecycleScope.launch(Dispatchers.Default) {
+            historySyncJob?.join()
             var failure: Throwable? = null
             var producedOutput = false
             try {
@@ -818,6 +823,36 @@ class MainActivity : AppCompatActivity() {
         updateEmptyState()
         scrollMessagesToBottom()
         if (saveSelection) saveConversationHistory()
+        syncEngineHistory()
+    }
+
+    // Rebuilds the engine context for the active conversation: resets the chat state
+    // with a fresh system prompt, then replays the stored turns.
+    private fun syncEngineHistory() {
+        val inferenceEngine = engine ?: return
+        if (!isModelReady) return
+        if (generationJob?.isActive == true) return
+        val historyJson = buildHistoryJson(messages)
+        historySyncJob = lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                inferenceEngine.setSystemPrompt(buildSystemPrompt())
+                if (historyJson != "[]") inferenceEngine.processHistory(historyJson)
+            }.onFailure { exception -> Log.w(TAG, "Unable to sync conversation history", exception) }
+        }
+    }
+
+    private fun buildHistoryJson(conversationMessages: List<Message>): String {
+        val array = JSONArray()
+        for (message in conversationMessages) {
+            val content = message.content.trim()
+            if (content.isEmpty()) continue
+            array.put(
+                JSONObject()
+                    .put("role", if (message.isUser) "user" else "assistant")
+                    .put("content", content)
+            )
+        }
+        return array.toString()
     }
 
     private fun activeConversation(): Conversation? =

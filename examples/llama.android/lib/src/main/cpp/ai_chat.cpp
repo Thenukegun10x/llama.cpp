@@ -959,3 +959,59 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processToolResponse(
     stop_generation_position = current_position + tool_prompt_size + n_predict;
     return 0;
 }
+
+// Replays stored conversation turns into the context, in order.
+// jhistory_json: JSON array of {"role":"user"|"assistant","content":"..."}.
+// Must be called after processSystemPrompt.
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeProcessHistory(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jstring jhistory_json
+) {
+    reset_short_term_states();
+
+    if (!jhistory_json || !g_context) return 1;
+
+    const char *history_chars = env->GetStringUTFChars(jhistory_json, nullptr);
+    std::string history_json(history_chars ? history_chars : "");
+    if (history_chars) env->ReleaseStringUTFChars(jhistory_json, history_chars);
+    if (history_json.empty()) return 0;
+
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+
+    try {
+        auto history = json::parse(history_json);
+        if (!history.is_array()) return 1;
+
+        for (const auto & item : history) {
+            const std::string role = item.value("role", "user");
+            const std::string content = item.value("content", "");
+            if (content.empty()) continue;
+
+            std::string formatted = content;
+            if (has_chat_template) {
+                formatted = chat_add_and_format(role, content);
+            }
+
+            auto tokens = common_tokenize(g_context, formatted, has_chat_template, has_chat_template);
+            if (tokens.empty()) continue;
+
+            // Shift context if this turn cannot fit
+            if (current_position + (int) tokens.size() >= g_n_ctx - OVERFLOW_HEADROOM) {
+                shift_context();
+            }
+
+            if (decode_tokens_in_batches(g_context, g_batch, tokens, current_position)) {
+                LOGe("%s: llama_decode() failed during history replay!", __func__);
+                return 2;
+            }
+            current_position += (int) tokens.size();
+        }
+    } catch (const std::exception & e) {
+        LOGe("%s: Failed to replay history: %s", __func__, e.what());
+        return 3;
+    }
+    return 0;
+}

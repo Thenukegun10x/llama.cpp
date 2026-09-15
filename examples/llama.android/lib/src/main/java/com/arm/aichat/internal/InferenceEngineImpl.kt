@@ -122,6 +122,9 @@ internal class InferenceEngineImpl private constructor(
     private external fun shutdown()
 
     @FastNative
+    private external fun nativeProcessHistory(historyJson: String): Int
+
+    @FastNative
     private external fun nativeSetTools(toolsJson: String)
 
     @FastNative
@@ -251,6 +254,12 @@ internal class InferenceEngineImpl private constructor(
             }
             Log.i(TAG, "System prompt processed! Awaiting user prompt...")
             _state.value = InferenceEngine.State.ModelReady
+        }
+
+    override suspend fun processHistory(historyJson: String) =
+        withContext(llamaDispatcher) {
+            val result = nativeProcessHistory(historyJson)
+            if (result != 0) Log.w(TAG, "History replay failed with code $result")
         }
 
     override suspend fun setTools(toolsJson: String) =
