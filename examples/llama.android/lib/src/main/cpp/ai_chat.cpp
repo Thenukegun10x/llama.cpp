@@ -46,7 +46,7 @@ static float          g_penalty_repeat  = 1.0f;
 
 static llama_model                      * g_model;
 static llama_context                    * g_context;
-static llama_batch                        g_batch;
+static common_batch                       g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
 
@@ -189,7 +189,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobje
     auto *context = init_context(g_model);
     if (!context) { return 1; }
     g_context = context;
-    g_batch = llama_batch_init(BATCH_SIZE, 0, 1);
+    g_batch = common_batch(context);
     g_chat_templates = common_chat_templates_init(g_model, "");
     g_sampler = new_sampler();
     return 0;
@@ -237,18 +237,18 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_benchModel(JNIEnv *env, jobject
     for (nri = 0; nri < nr; nri++) {
         LOGi("Benchmark prompt processing (pp = %d)", pp);
 
-        common_batch_clear(g_batch);
+        common_batch batch(context);
 
         const int n_tokens = pp;
         for (i = 0; i < n_tokens; i++) {
-            common_batch_add(g_batch, 0, i, {0}, false);
+            batch.add(0, i, 0, false);
         }
 
-        g_batch.logits[g_batch.n_tokens - 1] = true;
+        batch.set_output(batch.size() - 1, true);
         llama_memory_clear(llama_get_memory(context), false);
 
         const auto t_pp_start = ggml_time_us();
-        if (llama_decode(context, g_batch) != 0) {
+        if (llama_process(context, LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0) {
             LOGe("llama_decode() failed during prompt processing");
         }
         const auto t_pp_end = ggml_time_us();
@@ -260,12 +260,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_benchModel(JNIEnv *env, jobject
         llama_memory_clear(llama_get_memory(context), false);
         const auto t_tg_start = ggml_time_us();
         for (i = 0; i < tg; i++) {
-            common_batch_clear(g_batch);
+            batch.clear();
             for (j = 0; j < pl; j++) {
-                common_batch_add(g_batch, 0, i, {j}, true);
+                batch.add(0, i, j, true);
             }
 
-            if (llama_decode(context, g_batch) != 0) {
+            if (llama_process(context, LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0) {
                 LOGe("llama_decode() failed during text generation");
             }
         }
@@ -381,7 +381,7 @@ static std::string chat_format_single_with_tools(const struct common_chat_templa
     if (!past_msg.empty()) {
         inputs.messages = past_msg;
         inputs.add_generation_prompt = false;
-        fmt_past_msg = common_chat_templates_apply(tmpls, inputs).prompt;
+        fmt_past_msg = common_chat_templates_apply(tmpls, inputs).prompt.str();
     }
     std::ostringstream ss;
     if (add_ass && !fmt_past_msg.empty() && fmt_past_msg.back() == '\n') {
@@ -391,17 +391,13 @@ static std::string chat_format_single_with_tools(const struct common_chat_templa
     inputs.add_generation_prompt = add_ass;
 
     auto params = common_chat_templates_apply(tmpls, inputs);
-    auto fmt_new_msg = params.prompt;
+    std::string fmt_new_msg = params.prompt.str();
 
     if (add_ass) {
         g_active_chat_params = params;
         g_active_parser_params = common_chat_parser_params(g_active_chat_params);
-        g_active_parser_params.parse_tool_calls = true;
-        g_active_parser_params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
         if (!g_active_chat_params.parser.empty()) {
-            common_peg_arena arena;
-            arena.load(g_active_chat_params.parser);
-            g_active_parser_params.parser = std::move(arena);
+            g_active_parser_params.parser = g_active_chat_params.parser;
             g_has_active_parser = true;
             LOGi("%s: Active chat parser initialized (format=%s, thinking=%d)",
                  __func__, common_chat_format_name(g_active_chat_params.format),
@@ -468,7 +464,7 @@ static void record_assistant_message(const std::string & response) {
     new_msg.content = response;
     if (g_has_active_parser) {
         try {
-            common_chat_msg parsed = common_chat_parse(response, false, g_active_parser_params);
+            common_chat_msg parsed = common_chat_parse(common_chat_input(response), false, g_active_parser_params);
             if (!parsed.tool_calls.empty()) {
                 new_msg.tool_calls = parsed.tool_calls;
                 new_msg.reasoning_content = parsed.reasoning_content;
@@ -515,7 +511,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeContextUsage(JNIEnv *env,
 
 static int decode_tokens_in_batches(
         llama_context *context,
-        llama_batch &batch,
+        common_batch &batch,
         const llama_tokens &tokens,
         const llama_pos start_pos,
         const bool compute_last_logit = false) {
@@ -523,7 +519,7 @@ static int decode_tokens_in_batches(
          __func__, (int) tokens.size(), start_pos, (int) compute_last_logit);
     for (int i = 0; i < (int) tokens.size(); i += BATCH_SIZE) {
         const int cur_batch_size = std::min((int) tokens.size() - i, BATCH_SIZE);
-        common_batch_clear(batch);
+        batch.clear();
         LOGi("%s: Preparing batch of %d tokens (offset %d)", __func__, cur_batch_size, i);
 
         // Shift context if current batch cannot fit into the context
@@ -537,13 +533,13 @@ static int decode_tokens_in_batches(
             const llama_token token_id = tokens[i + j];
             const llama_pos position = start_pos + i + j;
             const bool want_logit = compute_last_logit && (i + j == tokens.size() - 1);
-            common_batch_add(batch, token_id, position, {0}, want_logit);
+            batch.add(token_id, position, 0, want_logit);
         }
 
         // Decode this batch
-        LOGi("%s: Calling llama_decode(batch_size=%d)...", __func__, cur_batch_size);
-        const int decode_result = llama_decode(context, batch);
-        LOGi("%s: llama_decode returned %d", __func__, decode_result);
+        LOGi("%s: Calling llama_process(batch_size=%d)...", __func__, cur_batch_size);
+        const int decode_result = llama_process(context, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+        LOGi("%s: llama_process returned %d", __func__, decode_result);
         if (decode_result) {
             LOGe("%s: llama_decode failed w/ %d", __func__, decode_result);
             return 1;
@@ -737,10 +733,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     }
 
     // Populate the batch with new token, then decode
-    common_batch_clear(g_batch);
-    common_batch_add(g_batch, new_token_id, current_position, {0}, true);
-    if (llama_decode(g_context, g_batch) != 0) {
-        LOGe("%s: llama_decode() failed for generated token %d", __func__, new_token_id);
+    g_batch.clear();
+    g_batch.add(new_token_id, current_position, 0, true);
+    if (llama_process(g_context, LLAMA_PROCESS_TYPE_DECODE, g_batch.get()) != 0) {
+        LOGe("%s: llama_process() failed for generated token %d", __func__, new_token_id);
         return nullptr;
     }
 
@@ -780,7 +776,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     common_sampler_free(g_sampler);
     g_sampler = nullptr;
     g_chat_templates.reset();
-    llama_batch_free(g_batch);
+    g_batch = common_batch();
     llama_free(g_context);
     g_context = nullptr;
     llama_model_free(g_model);
@@ -877,7 +873,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeParseResponse(
 
     if (g_has_active_parser) {
         try {
-            common_chat_msg parsed = common_chat_parse(raw_text, (bool) jis_partial, g_active_parser_params);
+            common_chat_msg parsed = common_chat_parse(common_chat_input(raw_text), (bool) jis_partial, g_active_parser_params);
             out["has_parser"] = true;
             out["content"] = parsed.content;
             out["reasoning_content"] = parsed.reasoning_content;
