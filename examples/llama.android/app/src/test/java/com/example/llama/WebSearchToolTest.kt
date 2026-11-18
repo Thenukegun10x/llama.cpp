@@ -186,11 +186,58 @@ class WebSearchToolTest {
     }
 
     @Test
+    fun parseToolCallSupportsTaggedFetchWithOptionalArgFirst() {
+        val call = tool.parseToolCall(
+            "<tool_call>web_fetch<arg_key>max_chars</arg_key><arg_value>10000</arg_value>" +
+                "<arg_key>url</arg_key><arg_value>https://example.com/page</arg_value></tool_call>"
+        )
+        assertNotNull(call)
+        assertEquals(WebSearchTool.ACTION_FETCH, call!!.action)
+        assertEquals("https://example.com/page", call.url)
+        assertEquals(10000, call.maxChars)
+    }
+
+    @Test
+    fun extractWebJsonFindsTaggedBlock() {
+        val block = tool.extractWebJson(
+            "<tool_call>web_search<arg_key>query</arg_key><arg_value>kotlin</arg_value></tool_call>"
+        )
+        assertNotNull(block)
+        assertTrue(block!!.contains("<arg_key>query</arg_key>"))
+    }
+
+    @Test
     fun toolResultPromptWrapsJson() {
         val call = WebSearchCall(WebSearchTool.ACTION_SEARCH, "kotlin", null, 5, 0, 6000)
         val prompt = tool.toolResultPrompt(call, "some results")
         assertTrue(prompt.startsWith("<tool_result>"))
         assertTrue(prompt.contains("</tool_result>"))
         assertTrue(prompt.contains("web_search"))
+    }
+
+    @Test
+    fun parseLiteResultsReadsTableRows() {
+        val doc = Jsoup.parse(
+            "<table>" +
+                "<tr><td>1.</td><td><a class='result-link' href='https://example.com/a'>First</a></td></tr>" +
+                "<tr><td class='result-snippet'>First snippet.</td></tr>" +
+                "<tr><td>2.</td><td><a class='result-link' href='https://example.org/b'>Second</a></td></tr>" +
+                "<tr><td class='result-snippet'>Second snippet.</td></tr>" +
+                "</table>",
+            "https://lite.duckduckgo.com/lite/"
+        )
+        val results = tool.parseLiteResults(doc)
+        assertEquals(2, results.size)
+        assertEquals("https://example.com/a", results[0].url)
+        assertEquals("First snippet.", results[0].snippet)
+        assertEquals("https://example.org/b", results[1].url)
+    }
+
+    @Test
+    fun toolResultPromptTruncatesLargeResults() {
+        val call = WebSearchCall(WebSearchTool.ACTION_FETCH, "", "https://example.com", 5, 0, 6000)
+        val prompt = tool.toolResultPrompt(call, "x".repeat(20_000))
+        assertTrue(prompt.contains("[... truncated]"))
+        assertTrue(prompt.length < 20_000)
     }
 }

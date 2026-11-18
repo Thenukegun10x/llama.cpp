@@ -21,13 +21,32 @@ interface InferenceEngine {
     suspend fun loadModel(pathToModel: String)
 
     /**
-     * Set context size, KV cache type and thread count. Applies on the next [loadModel] call.
+     * Set context size, KV cache type, thread counts and GPU/MoE options.
+     * Applies on the next [loadModel] call.
      *
      * @param nCtx context size in tokens (e.g. 2048, 4096, 8192)
      * @param kvCacheType 0 = F16, 1 = Q8_0, 2 = Q4_0
-     * @param threads worker threads, or 0/negative for auto
+     * @param threads decode worker threads, or 0/negative for auto
+     * @param prefillThreads prompt-processing threads, or 0/negative for auto
+     * @param gpuLayers layers on the GPU, negative for all, 0 for CPU only
+     * @param moeCpuExperts keep MoE expert tensors in host memory
+     * @param moeCacheMiB GPU cache size for host-resident MoE experts
      */
-    suspend fun configure(nCtx: Int, kvCacheType: Int, threads: Int = 0)
+    suspend fun configure(
+        nCtx: Int,
+        kvCacheType: Int,
+        threads: Int = 0,
+        prefillThreads: Int = 0,
+        gpuLayers: Int = -1,
+        moeCpuExperts: Boolean = false,
+        moeCacheMiB: Int = 0,
+    )
+
+    /**
+     * Applies decode/prefill thread counts to the live context, for thermal throttling.
+     * Safe to call from any thread while generation is running.
+     */
+    fun setThreads(threads: Int, prefillThreads: Int)
 
     /**
      * Update sampling params. Applies live when the engine is idle.

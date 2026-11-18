@@ -34,9 +34,14 @@ constexpr int   BATCH_SIZE              = 512;
 constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
 
 // Runtime-tunable config, set from the app via configure()/updateSampling().
-// Context size and KV types apply on the next model load; sampling applies live.
+// Context size, KV types, GPU layers and MoE options apply on the next model load;
+// sampling applies live. Threads can also be changed live via nativeSetThreads().
 static int            g_n_ctx           = DEFAULT_CONTEXT_SIZE;
-static int            g_n_threads       = 0; // 0 = auto
+static int            g_n_threads       = 0; // 0 = auto, decode
+static int            g_n_threads_batch = 0; // 0 = auto, prefill
+static int            g_n_gpu_layers    = -1; // negative = all layers
+static bool           g_moe_cpu_experts = false;
+static size_t         g_moe_cache_size  = 0;
 static enum ggml_type g_type_k          = GGML_TYPE_F16;
 static enum ggml_type g_type_v          = GGML_TYPE_F16;
 static float          g_temp            = DEFAULT_SAMPLER_TEMP;
@@ -79,16 +84,24 @@ JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path) {
     llama_model_params model_params = llama_model_default_params();
     model_params.use_extra_bufts = false;
+    model_params.n_gpu_layers = g_n_gpu_layers;
 
     // Keep the large output projection (vocab size 128k, ~200MB) on CPU to avoid
-    // mobile GPU storage buffer range limitations (>128MB) and driver fence hangs,
-    // while keeping all 29 repeating transformer layers accelerated on Vulkan GPU.
-    static const llama_model_tensor_buft_override tensor_buft_overrides[] = {
-        { "output\\.weight", ggml_backend_cpu_buffer_type() },
-        { "^output$",        ggml_backend_cpu_buffer_type() },
-        { nullptr,           nullptr }
-    };
+    // mobile GPU storage buffer range limitations (>128MB) and driver fence hangs.
+    // Optionally keep MoE expert tensors in host memory; the context can then cache
+    // hot experts on the GPU with moe_cache_size.
+    static llama_model_tensor_buft_override tensor_buft_overrides[8];
+    int n_overrides = 0;
+    tensor_buft_overrides[n_overrides++] = { "output\\.weight", ggml_backend_cpu_buffer_type() };
+    tensor_buft_overrides[n_overrides++] = { "^output$",        ggml_backend_cpu_buffer_type() };
+    if (g_moe_cpu_experts) {
+        tensor_buft_overrides[n_overrides++] = llm_ffn_exps_cpu_override();
+    }
+    tensor_buft_overrides[n_overrides] = { nullptr, nullptr };
     model_params.tensor_buft_overrides = tensor_buft_overrides;
+
+    LOGi("%s: n_gpu_layers=%d moe_cpu=%d moe_cache=%zu MiB",
+         __func__, g_n_gpu_layers, (int) g_moe_cpu_experts, g_moe_cache_size / (1024 * 1024));
 
     const auto *model_path = env->GetStringUTFChars(jmodel_path, 0);
     LOGd("%s: Loading model from: \n%s\n", __func__, model_path);
@@ -111,12 +124,12 @@ static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
     const int ctx = n_ctx > 0 ? n_ctx : g_n_ctx;
 
     // Multi-threading setup; explicit user value wins, otherwise a capped default
-    const int n_threads = g_n_threads > 0
-        ? g_n_threads
-        : std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
-                                           (int) sysconf(_SC_NPROCESSORS_ONLN) -
-                                           N_THREADS_HEADROOM));
-    LOGi("%s: Using %d threads", __func__, n_threads);
+    const int auto_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
+                                                       (int) sysconf(_SC_NPROCESSORS_ONLN) -
+                                                       N_THREADS_HEADROOM));
+    const int n_threads = g_n_threads > 0 ? g_n_threads : auto_threads;
+    const int n_threads_batch = g_n_threads_batch > 0 ? g_n_threads_batch : n_threads;
+    LOGi("%s: Using %d decode threads, %d prefill threads", __func__, n_threads, n_threads_batch);
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
@@ -129,10 +142,11 @@ static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
     ctx_params.n_batch = BATCH_SIZE;
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
-    ctx_params.n_threads_batch = n_threads;
+    ctx_params.n_threads_batch = n_threads_batch;
     ctx_params.type_k = g_type_k;
     ctx_params.type_v = g_type_v;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    ctx_params.moe_cache_size = g_moe_cpu_experts ? g_moe_cache_size : 0;
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
@@ -149,14 +163,20 @@ static common_sampler *new_sampler() {
     return common_sampler_init(g_model, sparams);
 }
 
-// Applies context size + KV cache type + thread count on the next model load.
-// kv_type: 0 = F16, 1 = Q8_0, 2 = Q4_0. n_threads <= 0 = auto.
+// Applies context size + KV cache type + thread counts + GPU/MoE settings on the next model load.
+// kv_type: 0 = F16, 1 = Q8_0, 2 = Q4_0. n_threads/n_threads_batch <= 0 = auto.
+// n_gpu_layers: negative = all layers, 0 = CPU only.
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_nativeConfigure(JNIEnv * /*env*/, jobject /*unused*/,
-        jint n_ctx, jint kv_type, jint n_threads) {
+        jint n_ctx, jint kv_type, jint n_threads, jint n_threads_batch,
+        jint n_gpu_layers, jboolean moe_cpu_experts, jint moe_cache_mib) {
     g_n_ctx = n_ctx > 0 ? n_ctx : DEFAULT_CONTEXT_SIZE;
     g_n_threads = n_threads > 0 ? n_threads : 0;
+    g_n_threads_batch = n_threads_batch > 0 ? n_threads_batch : 0;
+    g_n_gpu_layers = n_gpu_layers < 0 ? -1 : n_gpu_layers;
+    g_moe_cpu_experts = moe_cpu_experts;
+    g_moe_cache_size = moe_cache_mib > 0 ? (size_t) moe_cache_mib * 1024 * 1024 : 0;
     enum ggml_type kv = GGML_TYPE_F16;
     if (kv_type == 1) {
         kv = GGML_TYPE_Q8_0;
@@ -165,7 +185,21 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeConfigure(JNIEnv * /*env*
     }
     g_type_k = kv;
     g_type_v = kv;
-    LOGi("%s: n_ctx=%d kv=%d n_threads=%d", __func__, g_n_ctx, (int) kv_type, g_n_threads);
+    LOGi("%s: n_ctx=%d kv=%d threads=%d/%d gpu_layers=%d moe_cpu=%d moe_cache=%d MiB",
+         __func__, g_n_ctx, (int) kv_type, g_n_threads, g_n_threads_batch,
+         g_n_gpu_layers, (int) g_moe_cpu_experts, moe_cache_mib);
+}
+
+// Applies thread counts to the live context. Called from the thermal guard.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeSetThreads(JNIEnv * /*env*/, jobject /*unused*/,
+        jint n_threads, jint n_threads_batch) {
+    if (g_context == nullptr || n_threads < 1 || n_threads_batch < 1) {
+        return;
+    }
+    llama_set_n_threads(g_context, n_threads, n_threads_batch);
+    LOGi("%s: decode=%d prefill=%d", __func__, n_threads, n_threads_batch);
 }
 
 // Updates sampling live; takes effect on the next prompt when idle.
@@ -374,6 +408,7 @@ static std::string chat_format_single_with_tools(const struct common_chat_templa
     if (!g_tools.empty()) {
         inputs.tools = g_tools;
     }
+    inputs.parallel_tool_calls = true;
     inputs.enable_thinking = true;
     inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
 
@@ -481,17 +516,17 @@ static void record_assistant_message(const std::string & response) {
 
 /**
  * Completion loop's short-term states:
- * - stop generation position
+ * - remaining predict budget
  * - token chars caching
  * - current assistant message being generated
  */
-static llama_pos stop_generation_position;
+static int remaining_predict_tokens;
 static std::string cached_token_chars;
 static std::ostringstream assistant_ss;
 static bool g_prompt_ends_with_think = false;
 
 static void reset_short_term_states() {
-    stop_generation_position = 0;
+    remaining_predict_tokens = 0;
     cached_token_chars.clear();
     assistant_ss.str("");
     g_prompt_ends_with_think = false;
@@ -656,8 +691,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     }
 
     // Update position
-    current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    current_position += (int) user_tokens.size();
+    remaining_predict_tokens = n_predict;
     return 0;
 }
 
@@ -707,17 +742,17 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         return env->NewStringUTF("<think>\n");
     }
 
+    // Stop if the predict budget is exhausted
+    if (remaining_predict_tokens <= 0) {
+        LOGw("%s: STOP: predict budget exhausted", __func__);
+        record_assistant_message(assistant_ss.str());
+        return nullptr;
+    }
+
     // Infinite text generation via context shifting
     if (current_position >= g_n_ctx - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
         shift_context();
-    }
-
-    // Stop if reaching the marked position
-    if (current_position >= stop_generation_position) {
-        LOGw("%s: STOP: hitting stop position: %d", __func__, stop_generation_position);
-        record_assistant_message(assistant_ss.str());
-        return nullptr;
     }
 
     // Sample next token
@@ -742,6 +777,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // Update position
     current_position++;
+    remaining_predict_tokens--;
 
     // If not EOG, convert to text
     auto new_token_chars = common_token_to_piece(g_context, new_token_id);
@@ -951,8 +987,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processToolResponse(
         return 2;
     }
 
-    current_position += tool_prompt_size;
-    stop_generation_position = current_position + tool_prompt_size + n_predict;
+    current_position += (int) tool_tokens.size();
+    remaining_predict_tokens = n_predict;
     return 0;
 }
 

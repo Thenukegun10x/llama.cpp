@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -99,6 +100,8 @@ class MainActivity : AppCompatActivity() {
     private var speechJob: Job? = null
     private var historySyncJob: Job? = null
     private var nativeToolsSupported = false
+    private var thermalStatus = PowerManager.THERMAL_STATUS_NONE
+    private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
 
     private val requestMicrophonePermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -124,6 +127,7 @@ class MainActivity : AppCompatActivity() {
         speechRecognizer = OnDeviceSpeechRecognizer(applicationContext)
         toolSettings = ToolSettings(applicationContext)
         inferenceSettings = InferenceSettings(applicationContext)
+        registerThermalMonitor()
         toolbar = findViewById(R.id.toolbar)
         modelStatusTv = findViewById(R.id.model_status)
         messagesRv = findViewById(R.id.messages)
@@ -160,6 +164,45 @@ class MainActivity : AppCompatActivity() {
         }
         changeModelBtn.setOnClickListener { showModelManager() }
         micButton.setOnClickListener { toggleVoiceInput() }
+    }
+
+    private fun registerThermalMonitor() {
+        val powerManager = getSystemService(PowerManager::class.java)
+        thermalStatus = powerManager.currentThermalStatus
+        val listener = PowerManager.OnThermalStatusChangedListener { status ->
+            thermalStatus = status
+            Log.i(TAG, "Thermal status changed: $status")
+            if (status >= PowerManager.THERMAL_STATUS_CRITICAL && isGenerating) {
+                Log.w(TAG, "Thermal critical, stopping generation")
+                stopGeneration()
+            }
+            applyThermalPolicy()
+        }
+        powerManager.addThermalStatusListener(mainExecutor, listener)
+        thermalListener = listener
+    }
+
+    private fun applyThermalPolicy() {
+        val inferenceEngine = engine ?: return
+        if (!isModelReady) return
+
+        val baseDecode = inferenceSettings.threads
+        val basePrefill = inferenceSettings.prefillThreads
+        val (decode, prefill) = if (!inferenceSettings.thermalGuard) {
+            baseDecode to basePrefill
+        } else when (thermalStatus) {
+            PowerManager.THERMAL_STATUS_LIGHT ->
+                minOf(baseDecode, 2) to minOf(basePrefill, 3)
+            PowerManager.THERMAL_STATUS_MODERATE ->
+                minOf(baseDecode, 1) to minOf(basePrefill, 2)
+            PowerManager.THERMAL_STATUS_SEVERE,
+            PowerManager.THERMAL_STATUS_CRITICAL,
+            PowerManager.THERMAL_STATUS_EMERGENCY,
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> 1 to 1
+            else -> baseDecode to basePrefill
+        }
+        inferenceEngine.setThreads(decode, prefill)
+        Log.i(TAG, "Thermal threads: decode=$decode prefill=$prefill status=$thermalStatus")
     }
 
     private fun setupToolbar() {
@@ -316,11 +359,13 @@ class MainActivity : AppCompatActivity() {
             toolSettings.webToolsEnabled = webToggle.isChecked
             lifecycleScope.launch {
                 val inferenceEngine = engine ?: return@launch
-                withContext(Dispatchers.IO) {
-                    inferenceEngine.setTools(ToolDefinitions.buildToolsJson(toolSettings))
-                    nativeToolsSupported = inferenceEngine.hasNativeToolSupport()
-                    inferenceEngine.setSystemPrompt(buildSystemPrompt())
-                }
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        inferenceEngine.setTools(ToolDefinitions.buildToolsJson(toolSettings))
+                        nativeToolsSupported = inferenceEngine.hasNativeToolSupport()
+                        inferenceEngine.setSystemPrompt(buildSystemPrompt())
+                    }
+                }.onFailure { exception -> Log.w(TAG, "Unable to apply tool settings", exception) }
             }
         }
 
@@ -334,6 +379,11 @@ class MainActivity : AppCompatActivity() {
         val ctxSpinner = content.findViewById<Spinner>(R.id.setting_context_size)
         val kvSpinner = content.findViewById<Spinner>(R.id.setting_kv_cache)
         val threadsSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_threads)
+        val prefillThreadsSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_prefill_threads)
+        val gpuLayersSpinner = content.findViewById<Spinner>(R.id.setting_gpu_layers)
+        val moeCpuToggle = content.findViewById<MaterialCheckBox>(R.id.setting_moe_cpu)
+        val moeCacheSpinner = content.findViewById<Spinner>(R.id.setting_moe_cache)
+        val thermalGuardToggle = content.findViewById<MaterialCheckBox>(R.id.setting_thermal_guard)
         val tempSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_temperature)
         val topPSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_p)
         val topKSlider = content.findViewById<com.google.android.material.slider.Slider>(R.id.setting_top_k)
@@ -345,10 +395,15 @@ class MainActivity : AppCompatActivity() {
         val repeatLabel = content.findViewById<TextView>(R.id.setting_repeat_label)
         val maxTokensLabel = content.findViewById<TextView>(R.id.setting_max_tokens_label)
         val threadsLabel = content.findViewById<TextView>(R.id.setting_threads_label)
+        val prefillThreadsLabel = content.findViewById<TextView>(R.id.setting_prefill_threads_label)
 
         val prevCtx = inferenceSettings.contextSize
         val prevKv = inferenceSettings.kvCacheType
         val prevThreads = inferenceSettings.threads
+        val prevPrefillThreads = inferenceSettings.prefillThreads
+        val prevGpuLayers = inferenceSettings.gpuLayers
+        val prevMoeCpu = inferenceSettings.moeCpuExperts
+        val prevMoeCache = inferenceSettings.moeCacheMiB
 
         ctxSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -363,6 +418,25 @@ class MainActivity : AppCompatActivity() {
         )
         kvSpinner.setSelection(prevKv.coerceIn(0, InferenceSettings.KV_LABELS.size - 1))
         threadsSlider.valueTo = InferenceSettings.MAX_THREADS.toFloat()
+        prefillThreadsSlider.valueTo = InferenceSettings.MAX_THREADS.toFloat()
+        gpuLayersSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            InferenceSettings.GPU_LAYER_LABELS.toList()
+        )
+        gpuLayersSpinner.setSelection(
+            InferenceSettings.GPU_LAYER_OPTIONS.indexOf(prevGpuLayers).takeIf { it >= 0 } ?: 0
+        )
+        moeCpuToggle.isChecked = prevMoeCpu
+        moeCacheSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            InferenceSettings.MOE_CACHE_LABELS.toList()
+        )
+        moeCacheSpinner.setSelection(
+            InferenceSettings.MOE_CACHE_OPTIONS.indexOf(prevMoeCache).takeIf { it >= 0 } ?: 0
+        )
+        moeCacheSpinner.isEnabled = moeCpuToggle.isChecked
+        moeCpuToggle.setOnCheckedChangeListener { _, checked -> moeCacheSpinner.isEnabled = checked }
+        thermalGuardToggle.isChecked = inferenceSettings.thermalGuard
 
         fun refreshLabels() {
             tempLabel.text = getString(R.string.setting_temperature, tempSlider.value)
@@ -371,6 +445,7 @@ class MainActivity : AppCompatActivity() {
             repeatLabel.text = getString(R.string.setting_repeat_penalty, repeatSlider.value)
             maxTokensLabel.text = getString(R.string.setting_max_tokens, maxTokensSlider.value.toInt())
             threadsLabel.text = getString(R.string.setting_threads, threadsSlider.value.toInt())
+            prefillThreadsLabel.text = getString(R.string.setting_prefill_threads, prefillThreadsSlider.value.toInt())
         }
         tempSlider.value = inferenceSettings.temperature
         topPSlider.value = inferenceSettings.topP
@@ -378,6 +453,8 @@ class MainActivity : AppCompatActivity() {
         repeatSlider.value = inferenceSettings.repeatPenalty
         maxTokensSlider.value = inferenceSettings.maxTokens.toFloat()
         threadsSlider.value = prevThreads.toFloat().coerceIn(1f, InferenceSettings.MAX_THREADS.toFloat())
+        prefillThreadsSlider.value =
+            prevPrefillThreads.toFloat().coerceIn(1f, InferenceSettings.MAX_THREADS.toFloat())
         refreshLabels()
 
         val listener = com.google.android.material.slider.Slider.OnChangeListener { _, _, _ -> refreshLabels() }
@@ -387,17 +464,26 @@ class MainActivity : AppCompatActivity() {
         repeatSlider.addOnChangeListener(listener)
         maxTokensSlider.addOnChangeListener(listener)
         threadsSlider.addOnChangeListener(listener)
+        prefillThreadsSlider.addOnChangeListener(listener)
 
         dialog.setOnDismissListener {
             inferenceSettings.contextSize =
                 InferenceSettings.CONTEXT_OPTIONS[ctxSpinner.selectedItemPosition]
             inferenceSettings.kvCacheType = kvSpinner.selectedItemPosition
             inferenceSettings.threads = threadsSlider.value.toInt()
+            inferenceSettings.prefillThreads = prefillThreadsSlider.value.toInt()
+            inferenceSettings.gpuLayers =
+                InferenceSettings.GPU_LAYER_OPTIONS[gpuLayersSpinner.selectedItemPosition]
+            inferenceSettings.moeCpuExperts = moeCpuToggle.isChecked
+            inferenceSettings.moeCacheMiB =
+                InferenceSettings.MOE_CACHE_OPTIONS[moeCacheSpinner.selectedItemPosition]
+            inferenceSettings.thermalGuard = thermalGuardToggle.isChecked
             inferenceSettings.temperature = tempSlider.value
             inferenceSettings.topP = topPSlider.value
             inferenceSettings.topK = topKSlider.value.toInt()
             inferenceSettings.repeatPenalty = repeatSlider.value
             inferenceSettings.maxTokens = maxTokensSlider.value.toInt()
+            applyThermalPolicy()
             lifecycleScope.launch {
                 runCatching {
                     engine?.updateSampling(
@@ -409,7 +495,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (isModelReady && (inferenceSettings.contextSize != prevCtx ||
                         inferenceSettings.kvCacheType != prevKv ||
-                        inferenceSettings.threads != prevThreads)) {
+                        inferenceSettings.gpuLayers != prevGpuLayers ||
+                        inferenceSettings.moeCpuExperts != prevMoeCpu ||
+                        inferenceSettings.moeCacheMiB != prevMoeCache)) {
                     showToast(getString(R.string.reload_model_to_apply))
                 }
             }
@@ -501,7 +589,11 @@ class MainActivity : AppCompatActivity() {
                 inferenceEngine.configure(
                     inferenceSettings.contextSize,
                     inferenceSettings.kvCacheType,
-                    inferenceSettings.threads
+                    inferenceSettings.threads,
+                    inferenceSettings.prefillThreads,
+                    inferenceSettings.gpuLayers,
+                    inferenceSettings.moeCpuExperts,
+                    inferenceSettings.moeCacheMiB,
                 )
                 inferenceEngine.updateSampling(
                     inferenceSettings.temperature,
@@ -520,6 +612,7 @@ class MainActivity : AppCompatActivity() {
             selectedModelName = modelName
             chatStore.saveLastModelName(modelName)
             isModelReady = true
+            applyThermalPolicy()
             refreshUi()
             updateCtxTracker()
         } catch (exception: Exception) {
@@ -645,12 +738,16 @@ class MainActivity : AppCompatActivity() {
                 var isFirstTurn = true
                 var lastToolCall: ToolCall? = null
                 var lastToolResult: String = ""
+                var retriedEmptyToolTurn = false
+                var nudgeNextTurn = false
 
                 while (true) {
                     val generatedResponse = StringBuilder()
                     var turnEmittedTokens = 0
 
-                    val tokenFlow = if (isFirstTurn || !nativeToolsSupported || lastToolCall == null) {
+                    val tokenFlow = if (nudgeNextTurn) {
+                        inferenceEngine.sendUserPrompt(getString(R.string.tool_retry_nudge), inferenceSettings.maxTokens)
+                    } else if (isFirstTurn || !nativeToolsSupported || lastToolCall == null) {
                         inferenceEngine.sendUserPrompt(
                             if (isFirstTurn) userMessage else toolResultPrompt(lastToolCall!!, lastToolResult),
                             inferenceSettings.maxTokens
@@ -667,6 +764,7 @@ class MainActivity : AppCompatActivity() {
                             inferenceSettings.maxTokens
                         )
                     }
+                    nudgeNextTurn = false
                     isFirstTurn = false
 
                     tokenFlow.collect { token ->
@@ -699,8 +797,13 @@ class MainActivity : AppCompatActivity() {
 
                     if (toolCall == null) {
                         if (turnEmittedTokens == 0 && toolCallCount > 0) {
+                            if (!retriedEmptyToolTurn) {
+                                retriedEmptyToolTurn = true
+                                nudgeNextTurn = true
+                                continue
+                            }
                             withContext(Dispatchers.Main) {
-                                updateLastAssistantMessage(getString(R.string.generation_stopped))
+                                updateLastAssistantMessage(getString(R.string.tool_no_response))
                             }
                         }
                         break
@@ -725,6 +828,10 @@ class MainActivity : AppCompatActivity() {
             } finally {
                 updateCtxTracker()
                 withContext(NonCancellable + Dispatchers.Main) {
+                    val placeholder = getString(R.string.thinking)
+                    if (messages.lastOrNull()?.let { !it.isUser && it.content == placeholder } == true) {
+                        updateLastAssistantMessage(getString(R.string.tool_no_response))
+                    }
                     if (!producedOutput) {
                         updateLastAssistantMessage(
                             if (failure == null) getString(R.string.generation_stopped)
@@ -981,6 +1088,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        fun observeDownload(downloadId: Long, fileName: String) {
+            modelDownloadJob = lifecycleScope.launch {
+                try {
+                    val modelFile = modelRepository.awaitDownload(downloadId, fileName, ::updateDownloadProgress)
+                    modelsAdapter.replaceModels(modelRepository.localModels())
+                    downloadStatus.text = getString(R.string.download_complete, modelFile.name)
+                } catch (exception: CancellationException) {
+                    throw exception
+                } catch (exception: Exception) {
+                    Log.e(TAG, "Model download failed", exception)
+                    downloadStatus.text = getString(
+                        R.string.download_failed,
+                        exception.message ?: getString(R.string.model_load_failed)
+                    )
+                } finally {
+                    progress.visibility = View.GONE
+                    remoteModelsAdapter.setDownloading(null)
+                    setRepositoryControlsEnabled(true)
+                }
+            }
+        }
+
         fun downloadRemoteFile(file: HuggingFaceGgufFile) {
             if (modelDownloadJob?.isActive == true || repositoryIndexJob?.isActive == true) return
             val token = tokenInput.text?.toString()?.takeIf { it.isNotBlank() }
@@ -1051,6 +1180,22 @@ class MainActivity : AppCompatActivity() {
             false
         }
         modelsRv.adapter = modelsAdapter
+
+        // Re-attach to an in-flight DownloadManager transfer after reopening.
+        modelRepository.activeDownload()?.let { active ->
+            setRepositoryControlsEnabled(false)
+            remoteModelsAdapter.setDownloading(null)
+            progress.visibility = View.VISIBLE
+            progress.isIndeterminate = active.totalBytes <= 0
+            if (active.totalBytes > 0) {
+                progress.progress = ((active.downloadedBytes * 100) / active.totalBytes).toInt().coerceIn(0, 100)
+                downloadStatus.text = getString(R.string.download_progress, progress.progress)
+            } else {
+                downloadStatus.text =
+                    getString(R.string.download_bytes, (active.downloadedBytes / BYTES_PER_MEGABYTE).toInt())
+            }
+            observeDownload(active.id, active.fileName)
+        }
 
         importButton.setOnClickListener {
             dialog.dismiss()
@@ -1346,6 +1491,12 @@ class MainActivity : AppCompatActivity() {
         speechJob?.cancel()
         generationJob?.cancel()
         stopGeneration()
+        thermalListener?.let { listener ->
+            runCatching {
+                getSystemService(PowerManager::class.java).removeThermalStatusListener(listener)
+            }
+        }
+        thermalListener = null
         speechRecognizer.close()
         // destroy() unloads the model itself, so no separate unload here
         runCatching { engine?.destroy() }

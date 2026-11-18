@@ -5,6 +5,21 @@ import android.content.Context
 class InferenceSettings(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
+    init {
+        // One-time migration for installs that predate the decode/prefill split.
+        if (!preferences.getBoolean(KEY_MIGRATED, false)) {
+            val decode = preferences.getInt(KEY_THREADS, DEFAULT_THREADS)
+                .coerceIn(1, DEFAULT_THREADS)
+            val prefill = preferences.getInt(KEY_PREFILL_THREADS, DEFAULT_PREFILL_THREADS)
+                .coerceIn(1, DEFAULT_PREFILL_THREADS)
+            preferences.edit()
+                .putInt(KEY_THREADS, decode)
+                .putInt(KEY_PREFILL_THREADS, prefill)
+                .putBoolean(KEY_MIGRATED, true)
+                .apply()
+        }
+    }
+
     var contextSize: Int
         get() = preferences.getInt(KEY_CONTEXT_SIZE, DEFAULT_CONTEXT_SIZE)
         set(value) = preferences.edit().putInt(KEY_CONTEXT_SIZE, value).apply()
@@ -37,6 +52,26 @@ class InferenceSettings(context: Context) {
         get() = preferences.getInt(KEY_THREADS, DEFAULT_THREADS).coerceAtLeast(1)
         set(value) = preferences.edit().putInt(KEY_THREADS, value).apply()
 
+    var prefillThreads: Int
+        get() = preferences.getInt(KEY_PREFILL_THREADS, DEFAULT_PREFILL_THREADS).coerceAtLeast(1)
+        set(value) = preferences.edit().putInt(KEY_PREFILL_THREADS, value).apply()
+
+    var gpuLayers: Int
+        get() = preferences.getInt(KEY_GPU_LAYERS, GPU_LAYERS_ALL)
+        set(value) = preferences.edit().putInt(KEY_GPU_LAYERS, value).apply()
+
+    var moeCpuExperts: Boolean
+        get() = preferences.getBoolean(KEY_MOE_CPU_EXPERTS, false)
+        set(value) = preferences.edit().putBoolean(KEY_MOE_CPU_EXPERTS, value).apply()
+
+    var moeCacheMiB: Int
+        get() = preferences.getInt(KEY_MOE_CACHE_MIB, 0)
+        set(value) = preferences.edit().putInt(KEY_MOE_CACHE_MIB, value).apply()
+
+    var thermalGuard: Boolean
+        get() = preferences.getBoolean(KEY_THERMAL_GUARD, true)
+        set(value) = preferences.edit().putBoolean(KEY_THERMAL_GUARD, value).apply()
+
     companion object {
         private const val PREFERENCES_NAME = "llama_inference_settings"
         private const val KEY_CONTEXT_SIZE = "context_size"
@@ -47,6 +82,12 @@ class InferenceSettings(context: Context) {
         private const val KEY_REPEAT_PENALTY = "repeat_penalty"
         private const val KEY_KV_CACHE_TYPE = "kv_cache_type"
         private const val KEY_THREADS = "threads"
+        private const val KEY_PREFILL_THREADS = "prefill_threads"
+        private const val KEY_GPU_LAYERS = "gpu_layers"
+        private const val KEY_MOE_CPU_EXPERTS = "moe_cpu_experts"
+        private const val KEY_MOE_CACHE_MIB = "moe_cache_mib"
+        private const val KEY_THERMAL_GUARD = "thermal_guard"
+        private const val KEY_MIGRATED = "decode_prefill_migrated"
 
         const val DEFAULT_CONTEXT_SIZE = 4096
         const val DEFAULT_MAX_TOKENS = 1024
@@ -54,8 +95,9 @@ class InferenceSettings(context: Context) {
         const val DEFAULT_TOP_K = 40
         const val DEFAULT_TOP_P = 0.95f
         const val DEFAULT_REPEAT_PENALTY = 1.0f
-        val MAX_THREADS = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
-        val DEFAULT_THREADS = minOf(4, MAX_THREADS)
+        val MAX_THREADS = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val DEFAULT_THREADS = minOf(2, MAX_THREADS)
+        val DEFAULT_PREFILL_THREADS = minOf(4, MAX_THREADS)
 
         const val KV_F16 = 0
         const val KV_Q8_0 = 1
@@ -63,5 +105,12 @@ class InferenceSettings(context: Context) {
 
         val CONTEXT_OPTIONS = intArrayOf(2048, 4096, 8192, 16384)
         val KV_LABELS = arrayOf("F16 (best quality)", "Q8_0 (balanced)", "Q4_0 (low memory)")
+
+        const val GPU_LAYERS_ALL = -1
+        val GPU_LAYER_OPTIONS = intArrayOf(GPU_LAYERS_ALL, 32, 24, 20, 16, 12, 8, 4, 0)
+        val GPU_LAYER_LABELS = arrayOf("All layers", "32", "24", "20", "16", "12", "8", "4", "0 (CPU only)")
+
+        val MOE_CACHE_OPTIONS = intArrayOf(0, 256, 512, 1024, 2048)
+        val MOE_CACHE_LABELS = arrayOf("Off", "256 MiB", "512 MiB", "1024 MiB", "2048 MiB")
     }
 }

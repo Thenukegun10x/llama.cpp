@@ -114,4 +114,37 @@ class LfmToolParserTest {
         assertEquals("cats, dogs, and (birds) = awesome", call!!.getString("query"))
         assertEquals(5, call.getInt("limit"))
     }
+
+    @Test
+    fun testParseTaggedCallIgnoresArgOrder() {
+        val raw = "<tool_call>web_fetch<arg_key>max_chars</arg_key><arg_value>10000</arg_value>" +
+            "<arg_key>url</arg_key><arg_value>https://example.com/page</arg_value></tool_call>"
+        val call = LfmToolParser.parseFirst(raw)
+        assertNotNull(call)
+        assertEquals("web_fetch", call!!.getString("name"))
+        assertEquals("https://example.com/page", call.getString("url"))
+        assertEquals(10000, call.getInt("max_chars"))
+    }
+
+    @Test
+    fun testParseTaggedParallelCalls() {
+        val raw = "<tool_call>web_fetch<arg_key>max_chars</arg_key><arg_value>10000</arg_value>" +
+            "<arg_key>url</arg_key><arg_value>https://a.example</arg_value></tool_call>" +
+            "<tool_call>web_fetch<arg_key>max_chars</arg_key><arg_value>5000</arg_value>" +
+            "<arg_key>url</arg_key><arg_value>https://b.example</arg_value></tool_call>"
+        val calls = LfmToolParser.parseToolCalls(raw)
+        assertEquals(2, calls.size)
+        assertEquals("https://a.example", calls[0].getString("url"))
+        assertEquals("https://b.example", calls[1].getString("url"))
+    }
+
+    @Test
+    fun testExtractTaggedToolBlock() {
+        val raw = "Text before\n<tool_call>read_file<arg_key>path</arg_key><arg_value>notes.txt</arg_value></tool_call>"
+        val block = LfmToolParser.extractToolBlock(raw)
+        assertEquals(
+            "<tool_call>read_file<arg_key>path</arg_key><arg_value>notes.txt</arg_value></tool_call>",
+            block
+        )
+    }
 }

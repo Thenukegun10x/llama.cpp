@@ -89,7 +89,18 @@ internal class InferenceEngineImpl private constructor(
     private external fun load(modelPath: String): Int
 
     @FastNative
-    private external fun nativeConfigure(nCtx: Int, kvType: Int, nThreads: Int)
+    private external fun nativeConfigure(
+        nCtx: Int,
+        kvType: Int,
+        nThreads: Int,
+        nPrefillThreads: Int,
+        nGpuLayers: Int,
+        moeCpuExperts: Boolean,
+        moeCacheMiB: Int,
+    )
+
+    @FastNative
+    private external fun nativeSetThreads(nThreads: Int, nPrefillThreads: Int)
 
     @FastNative
     private external fun nativeUpdateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float)
@@ -140,7 +151,6 @@ internal class InferenceEngineImpl private constructor(
         MutableStateFlow<InferenceEngine.State>(InferenceEngine.State.Uninitialized)
     override val state: StateFlow<InferenceEngine.State> = _state.asStateFlow()
 
-    private var _readyForSystemPrompt = false
     @Volatile
     private var _cancelGeneration = false
 
@@ -174,10 +184,31 @@ internal class InferenceEngineImpl private constructor(
     /**
      * Load the LLM
      */
-    override suspend fun configure(nCtx: Int, kvCacheType: Int, threads: Int) =
-        withContext(llamaDispatcher) {
-            nativeConfigure(nCtx, kvCacheType, threads)
-        }
+    override suspend fun configure(
+        nCtx: Int,
+        kvCacheType: Int,
+        threads: Int,
+        prefillThreads: Int,
+        gpuLayers: Int,
+        moeCpuExperts: Boolean,
+        moeCacheMiB: Int,
+    ) = withContext(llamaDispatcher) {
+        nativeConfigure(
+            nCtx,
+            kvCacheType,
+            threads,
+            prefillThreads,
+            gpuLayers,
+            moeCpuExperts,
+            moeCacheMiB,
+        )
+    }
+
+    // Direct JNI call: the thermal listener may fire while the engine dispatcher is
+    // busy generating tokens, so this must not queue behind the generation coroutine.
+    override fun setThreads(threads: Int, prefillThreads: Int) {
+        nativeSetThreads(threads, prefillThreads)
+    }
 
     override suspend fun updateSampling(temp: Float, topK: Int, topP: Float, penaltyRepeat: Float) =
         withContext(llamaDispatcher) {
@@ -207,7 +238,6 @@ internal class InferenceEngineImpl private constructor(
                 }
 
                 Log.i(TAG, "Loading model... \n$pathToModel")
-                _readyForSystemPrompt = false
                 _state.value = InferenceEngine.State.LoadingModel
                 load(pathToModel).let {
                     // TODO-han.yin: find a better way to pass other error codes
@@ -217,7 +247,6 @@ internal class InferenceEngineImpl private constructor(
                     if (it != 0) throw IOException("Failed to prepare resources")
                 }
                 Log.i(TAG, "Model loaded!")
-                _readyForSystemPrompt = true
 
                 _cancelGeneration = false
                 _state.value = InferenceEngine.State.ModelReady
@@ -233,18 +262,16 @@ internal class InferenceEngineImpl private constructor(
      *
      * TODO-han.yin: return error code if system prompt not correct processed?
      */
-    override suspend fun setSystemPrompt(prompt: String) =
+    override suspend fun setSystemPrompt(systemPrompt: String) =
         withContext(llamaDispatcher) {
-            require(prompt.isNotBlank()) { "Cannot process empty system prompt!" }
-            check(_readyForSystemPrompt) { "System prompt must be set ** RIGHT AFTER ** model loaded!" }
+            require(systemPrompt.isNotBlank()) { "Cannot process empty system prompt!" }
             check(_state.value is InferenceEngine.State.ModelReady) {
                 "Cannot process system prompt in ${_state.value.javaClass.simpleName}!"
             }
 
             Log.i(TAG, "Sending system prompt...")
-            _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ProcessingSystemPrompt
-            processSystemPrompt(prompt).let { result ->
+            processSystemPrompt(systemPrompt).let { result ->
                 if (result != 0) {
                     RuntimeException("Failed to process system prompt: $result").also {
                         _state.value = InferenceEngine.State.Error(it)
@@ -323,8 +350,8 @@ internal class InferenceEngineImpl private constructor(
         }
 
         try {
+            _cancelGeneration = false
             Log.i(TAG, "Sending user prompt...")
-            _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ProcessingUserPrompt
 
             processUserPrompt(message, predictLength).let { result ->
@@ -370,8 +397,8 @@ internal class InferenceEngineImpl private constructor(
         }
 
         try {
+            _cancelGeneration = false
             Log.i(TAG, "Sending tool response for $toolName...")
-            _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ProcessingUserPrompt
 
             processToolResponse(toolName, callId, content, predictLength).let { result ->
@@ -414,7 +441,6 @@ internal class InferenceEngineImpl private constructor(
                 "Benchmark request discarded due to: $state"
             }
             Log.i(TAG, "Start benchmark (pp: $pp, tg: $tg, pl: $pl, nr: $nr)")
-            _readyForSystemPrompt = false   // Just to be safe
             _state.value = InferenceEngine.State.Benchmarking
             benchModel(pp, tg, pl, nr).also {
                 _state.value = InferenceEngine.State.ModelReady
@@ -439,7 +465,6 @@ internal class InferenceEngineImpl private constructor(
             when (val state = _state.value) {
                 is InferenceEngine.State.ModelReady -> {
                     Log.i(TAG, "Unloading model and free resources...")
-                    _readyForSystemPrompt = false
                     _state.value = InferenceEngine.State.UnloadingModel
 
                     unload()
@@ -466,7 +491,6 @@ internal class InferenceEngineImpl private constructor(
     override fun destroy() {
         _cancelGeneration = true
         runBlocking(llamaDispatcher) {
-            _readyForSystemPrompt = false
             when(_state.value) {
                 is InferenceEngine.State.Uninitialized -> {}
                 is InferenceEngine.State.Initialized -> shutdown()

@@ -17,6 +17,18 @@ object LfmToolParser {
         RegexOption.IGNORE_CASE
     )
 
+    private val TAGGED_CALL_REGEX = Regex(
+        """<\s*tool[_ -]?call\s*>(.*?)<\s*/\s*tool[_ -]?call\s*>""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+
+    private val TAGGED_ARG_REGEX = Regex(
+        """<\s*arg_key\s*>(.*?)<\s*/\s*arg_key\s*>\s*<\s*arg_value\s*>(.*?)<\s*/\s*arg_value\s*>""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+
+    private val TAGGED_NAME_REGEX = Regex("""^\s*([A-Za-z_][A-Za-z0-9_.]*)""")
+
     /**
      * Extracts the raw tool block string from [text] (including tags).
      * Handles both closed `<|tool_call_start|>...<|tool_call_end|>` and
@@ -34,6 +46,10 @@ object LfmToolParser {
         }
         // Also check regex in case of slight spacing variations e.g. <| tool_call_start |>
         TOOL_TAG_REGEX.find(text)?.let { return it.value }
+        // Native tagged form: <tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>
+        TAGGED_CALL_REGEX.find(text)?.let { match ->
+            if (match.groupValues[1].contains("arg_key", ignoreCase = true)) return match.value
+        }
         return null
     }
 
@@ -49,6 +65,9 @@ object LfmToolParser {
      * Returns a list of [JSONObject] with "name" and all parsed arguments.
      */
     fun parseToolCalls(text: String): List<JSONObject> {
+        val taggedCalls = parseTaggedCalls(text)
+        if (taggedCalls.isNotEmpty()) return taggedCalls
+
         val innerContent = extractInnerContent(text) ?: return emptyList()
         val trimmed = innerContent.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -64,6 +83,26 @@ object LfmToolParser {
 
         val callSnippets = splitTopLevelCalls(callsContent)
         return callSnippets.mapNotNull { parseSingleCall(it) }
+    }
+
+    private fun parseTaggedCalls(text: String): List<JSONObject> {
+        val calls = mutableListOf<JSONObject>()
+        for (match in TAGGED_CALL_REGEX.findAll(text)) {
+            val inner = match.groupValues[1]
+            if (!inner.contains("arg_key", ignoreCase = true)) continue
+            val funcName = TAGGED_NAME_REGEX.find(inner)?.groupValues?.get(1) ?: continue
+            val json = JSONObject()
+            json.put("name", funcName)
+            json.put("tool", funcName)
+            json.put("action", funcName)
+            for (arg in TAGGED_ARG_REGEX.findAll(inner)) {
+                val key = arg.groupValues[1].trim()
+                if (key.isBlank()) continue
+                json.put(key, parseValue(arg.groupValues[2].trim()))
+            }
+            calls.add(json)
+        }
+        return calls
     }
 
     private fun extractInnerContent(text: String): String? {

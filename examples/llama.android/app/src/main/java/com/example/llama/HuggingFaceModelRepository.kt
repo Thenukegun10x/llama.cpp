@@ -3,12 +3,11 @@ package com.example.llama
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
-import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
@@ -31,13 +30,19 @@ data class LocalModel(
 )
 
 class HuggingFaceModelRepository(context: Context) {
-    val modelsDirectory: File = File(context.filesDir, "models").apply { mkdirs() }
+    private val appContext = context.applicationContext
+    val modelsDirectory: File = File(appContext.filesDir, "models").apply { mkdirs() }
+    // DownloadManager can only write to app-specific external storage.
+    val downloadDirectory: File =
+        File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, ModelDownloader.DOWNLOAD_SUBDIR).apply { mkdirs() }
+    private val downloader = ModelDownloader(appContext)
 
-    fun localModels(): List<LocalModel> = modelsDirectory.listFiles()
-        ?.filter { file -> file.extension.equals("gguf", ignoreCase = true) }
-        ?.map { LocalModel(it, detectModelType(it)) }
-        ?.sortedByDescending { it.file.lastModified() }
-        .orEmpty()
+    fun localModels(): List<LocalModel> = listOf(downloadDirectory, modelsDirectory)
+        .flatMap { directory -> directory.listFiles().orEmpty().toList() }
+        .filter { file -> file.extension.equals("gguf", ignoreCase = true) }
+        .distinctBy { file -> file.name }
+        .map { file -> LocalModel(file, detectModelType(file)) }
+        .sortedByDescending { it.file.lastModified() }
 
     fun detectModelType(file: File): ModelType = when {
         file.extension.equals("gguf", ignoreCase = true) -> {
@@ -191,10 +196,7 @@ class HuggingFaceModelRepository(context: Context) {
     ): File = withContext(Dispatchers.IO) {
         val url = normalizeUrl(source)
         val modelName = sanitizeFileName(URLDecoder.decode(url.path.substringAfterLast('/'), "UTF-8"))
-        require(modelName.endsWith(".gguf", ignoreCase = true)) {
-            "The URL must point to a .gguf file"
-        }
-        download(url, modelName, token, onProgress)
+        runDownload(url.toString(), modelName, token, onProgress)
     }
 
     suspend fun download(
@@ -203,11 +205,28 @@ class HuggingFaceModelRepository(context: Context) {
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val localName = sanitizeFileName(file.path.replace('/', '_'))
-        download(normalizeUrl(file.downloadUrl), localName, token, onProgress)
+        runDownload(normalizeUrl(file.downloadUrl).toString(), localName, token, onProgress)
     }
 
-    private suspend fun download(
-        url: URL,
+    suspend fun awaitDownload(
+        downloadId: Long,
+        fileName: String,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        downloader.observe(downloadId).collect { progress ->
+            onProgress(progress.downloadedBytes, progress.totalBytes)
+        }
+        val destination = File(downloadDirectory, fileName)
+        require(destination.exists()) { "Downloaded file is missing" }
+        destination
+    }
+
+    fun activeDownload(): ActiveDownload? = downloader.activeDownload()
+
+    fun cancelDownload(downloadId: Long) = downloader.cancel(downloadId)
+
+    private suspend fun runDownload(
+        url: String,
         modelName: String,
         token: String?,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
@@ -215,103 +234,23 @@ class HuggingFaceModelRepository(context: Context) {
         require(modelName.endsWith(".gguf", ignoreCase = true)) {
             "The URL must point to a .gguf file"
         }
+        validateDownloadUrl(url)
 
-        val destination = File(modelsDirectory, modelName)
-        require(!destination.exists()) { "$modelName already exists" }
-        val partial = File(modelsDirectory, "$modelName.part")
+        val destination = File(downloadDirectory, modelName)
+        require(!destination.exists() && !File(modelsDirectory, modelName).exists()) {
+            "$modelName already exists"
+        }
+        require(downloadDirectory.usableSpace > MIN_FREE_SPACE_BYTES) {
+            "Not enough free space for this model"
+        }
 
-        // Resume from a previous partial download so a dropped connection does not
-        // restart the whole transfer (GGUF files can be several gigabytes).
-        var downloadedBytes = partial.length().coerceAtLeast(0L)
-        var totalBytes = -1L
-        var completed = false
-        var lastAttemptBytes = downloadedBytes
+        return awaitDownload(downloader.enqueue(url, modelName, token), modelName, onProgress)
+    }
 
-        return try {
-            for (attempt in 0 until MAX_DOWNLOAD_ATTEMPTS) {
-                currentCoroutineContext().ensureActive()
-                if (attempt > 0) {
-                    delay(RETRY_BACKOFF_MS * attempt)
-                    downloadedBytes = partial.length().coerceAtLeast(0L)
-                }
-                lastAttemptBytes = downloadedBytes
-
-                val connection = openConnection(url, token)
-                if (downloadedBytes > 0) {
-                    connection.setRequestProperty("Range", "bytes=$downloadedBytes-")
-                }
-
-                try {
-                    connection.connect()
-                    val code = connection.responseCode
-                    require(code in 200..299) {
-                        "Hugging Face returned HTTP $code"
-                    }
-
-                    val contentRange = connection.getHeaderField("Content-Range")
-                    val lengthHeader = connection.contentLengthLong
-
-                    if (code == HTTP_PARTIAL && contentRange != null) {
-                        // "bytes start-end/total" -> recover the real total size.
-                        val rangePart = contentRange.substringAfter("bytes ").substringBefore('/')
-                        val start = rangePart.substringBefore('-').toLongOrNull() ?: downloadedBytes
-                        if (start != downloadedBytes) {
-                            // Server did not resume where we expected; restart cleanly.
-                            partial.delete()
-                            downloadedBytes = 0L
-                        }
-                        val slash = contentRange.substringAfter('/')
-                        totalBytes = slash.toLongOrNull() ?: lengthHeader
-                    } else if (downloadedBytes > 0 && code == HTTP_OK) {
-                        // Server ignored the Range header; start over.
-                        partial.delete()
-                        downloadedBytes = 0L
-                        totalBytes = lengthHeader
-                    } else {
-                        totalBytes = lengthHeader
-                    }
-
-                    if (totalBytes > 0) {
-                        require(modelsDirectory.usableSpace + downloadedBytes > totalBytes + MIN_FREE_SPACE_BYTES) {
-                            "Not enough free space for this model"
-                        }
-                    }
-
-                    connection.inputStream.use { input ->
-                        FileOutputStream(partial, downloadedBytes > 0L).use { output ->
-                            val buffer = ByteArray(BUFFER_SIZE)
-                            while (true) {
-                                currentCoroutineContext().ensureActive()
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                output.write(buffer, 0, count)
-                                downloadedBytes += count
-                                onProgress(downloadedBytes, totalBytes)
-                            }
-                            output.fd.sync()
-                        }
-                    }
-                    connection.disconnect()
-
-                    if (totalBytes <= 0 || downloadedBytes >= totalBytes) {
-                        require(partial.renameTo(destination)) { "Unable to finalize downloaded model" }
-                        completed = true
-                        break
-                    }
-                    // Loop and resume from where we left off.
-                } catch (e: Exception) {
-                    connection.disconnect()
-                    if (attempt == MAX_DOWNLOAD_ATTEMPTS - 1) throw e
-                    // Otherwise fall through and retry.
-                }
-            }
-
-            require(completed) {
-                "Download ended before the full file arrived (got $lastAttemptBytes of $totalBytes bytes)"
-            }
-            destination
-        } finally {
-            if (!completed) partial.delete()
+    private fun validateDownloadUrl(url: String) {
+        val parsed = URL(url)
+        require(parsed.protocol == "https" && isHuggingFaceHost(parsed)) {
+            "Only huggingface.co downloads are allowed"
         }
     }
 
@@ -420,15 +359,10 @@ class HuggingFaceModelRepository(context: Context) {
         private const val DEFAULT_REVISION = "main"
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 60_000
-        private const val BUFFER_SIZE = 1024 * 1024
         private const val MIN_FREE_SPACE_BYTES = 64L * 1024 * 1024
         private const val TREE_PAGE_SIZE = 1_000
         private const val MAX_TREE_PAGES = 20
         private const val MAX_INDEXED_GGUF_FILES = 500
-        private const val HTTP_OK = 200
-        private const val HTTP_PARTIAL = 206
-        private const val MAX_DOWNLOAD_ATTEMPTS = 8
-        private const val RETRY_BACKOFF_MS = 1_000L
         private val REPOSITORY_PART = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
         private val NEXT_PAGE_REGEX = Regex("""<([^>]+)>\s*;\s*rel="?next"?""")
 

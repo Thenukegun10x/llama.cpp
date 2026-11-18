@@ -65,7 +65,9 @@ class WebSearchTool {
                 val results = search(call.query, call.limit, call.offset)
                 if (results.isEmpty()) "No results found."
                 else results.mapIndexed { index, result ->
-                    "${call.offset + index + 1}. ${result.title}\n${result.url}\n${result.snippet}"
+                    val snippet = compactSnippet(result.snippet)
+                    if (snippet.isEmpty()) "${call.offset + index + 1}. ${result.title}\n${result.url}"
+                    else "${call.offset + index + 1}. ${result.title}\n${result.url}\n$snippet"
                 }.joinToString("\n\n")
             }
             else -> fetchPageText(
@@ -79,7 +81,7 @@ class WebSearchTool {
         val json = JSONObject()
             .put("name", call.action)
             .put("query", if (call.action == ACTION_SEARCH) call.query else (call.url ?: ""))
-            .put("result", result.take(MAX_TOOL_RESULT_CHARS))
+            .put("result", truncateResult(result))
         return "<tool_result>${json}</tool_result>\n\nPlease use the above search results to answer the user's request."
     }
 
@@ -102,6 +104,7 @@ class WebSearchTool {
     internal fun search(query: String, limit: Int, offset: Int): List<WebResult> {
         require(query.isNotBlank()) { "query is blank" }
         val out = mutableListOf<WebResult>()
+        val seenHosts = mutableSetOf<String>()
         var pageStart = (offset / RESULTS_PER_PAGE) * RESULTS_PER_PAGE
         var skip = offset - pageStart
         repeat(MAX_PAGES) {
@@ -109,6 +112,8 @@ class WebSearchTool {
             if (page.isEmpty()) return out
             for (result in page.drop(skip)) {
                 if (out.size >= limit) return out
+                val host = hostOf(result.url)
+                if (host != null && !seenHosts.add(host)) continue
                 out += result
             }
             skip = 0
@@ -119,14 +124,24 @@ class WebSearchTool {
     }
 
     internal fun fetchResultPage(query: String, start: Int): List<WebResult> {
-        val doc = Jsoup.connect(SEARCH_URL)
+        val primary = Jsoup.connect(SEARCH_URL)
             .data("q", query, "s", start.toString())
             .userAgent(USER_AGENT)
             .timeout(HTTP_TIMEOUT_MS)
             .maxBodySize(MAX_BODY_BYTES)
             .post()
-        return parseResults(doc)
+        val results = parseResults(primary)
+        if (results.isNotEmpty()) return results
+        return parseLiteResults(fetchLiteResultPage(query, start))
     }
+
+    private fun fetchLiteResultPage(query: String, start: Int): Document =
+        Jsoup.connect(SEARCH_LITE_URL)
+            .data("q", query, "s", start.toString())
+            .userAgent(USER_AGENT)
+            .timeout(HTTP_TIMEOUT_MS)
+            .maxBodySize(MAX_BODY_BYTES)
+            .post()
 
     // Pure: DDG html into results; unwraps /l/?uddg= redirect links and skips ads.
     internal fun parseResults(doc: Document): List<WebResult> =
@@ -169,15 +184,64 @@ class WebSearchTool {
         }.getOrNull()
     }
 
+    // Pure: DDG lite table rows into results.
+    internal fun parseLiteResults(doc: Document): List<WebResult> =
+        doc.select("a.result-link").mapNotNull { link ->
+            val rawHref = link.attr("abs:href").ifBlank { link.attr("href") }
+            val url = unwrapResultUrl(rawHref) ?: return@mapNotNull null
+            val title = link.text().trim()
+            if (title.isEmpty()) return@mapNotNull null
+            val snippet = link.closest("tr")
+                ?.nextElementSibling()
+                ?.selectFirst(".result-snippet")
+                ?.text()
+                ?.trim()
+                .orEmpty()
+            WebResult(title, url, snippet)
+        }
+
+    internal fun hostOf(url: String): String? =
+        runCatching { URL(url).host.lowercase().removePrefix("www.") }.getOrNull()
+
+    private fun compactSnippet(text: String): String {
+        val collapsed = text.replace(WHITESPACE_RE, " ").trim()
+        if (collapsed.length <= MAX_SNIPPET_CHARS) return collapsed
+        return safeTake(collapsed, MAX_SNIPPET_CHARS).trimEnd() + "..."
+    }
+
+    private fun truncateResult(text: String): String {
+        if (text.length <= MAX_TOOL_RESULT_CHARS) return text
+        return safeTake(text, MAX_TOOL_RESULT_CHARS).trimEnd() + "\n[... truncated]"
+    }
+
+    // Avoid splitting a surrogate pair when cutting to a char budget.
+    private fun safeTake(text: String, maxChars: Int): String {
+        if (text.length <= maxChars) return text
+        var end = maxChars.coerceAtLeast(0)
+        if (end > 0 && Character.isHighSurrogate(text[end - 1])) end--
+        return text.substring(0, end)
+    }
+
     internal fun fetchPageText(pageUrl: URL, maxChars: Int): String {
-        requirePublicHttpUrl(pageUrl)
-        val doc = Jsoup.connect(pageUrl.toString())
-            .userAgent(USER_AGENT)
-            .timeout(HTTP_TIMEOUT_MS)
-            .maxBodySize(MAX_BODY_BYTES)
-            .followRedirects(true)
-            .get()
-        return extractArticleText(doc).take(maxChars)
+        val doc = fetchDocument(pageUrl)
+        return safeTake(extractArticleText(doc), maxChars)
+    }
+
+    private fun fetchDocument(startUrl: URL): Document {
+        var current = startUrl
+        repeat(MAX_REDIRECTS) {
+            requirePublicHttpUrl(current)
+            val response = Jsoup.connect(current.toString())
+                .userAgent(USER_AGENT)
+                .timeout(HTTP_TIMEOUT_MS)
+                .maxBodySize(MAX_BODY_BYTES)
+                .followRedirects(false)
+                .ignoreHttpErrors(true)
+                .execute()
+            val location = response.header("Location") ?: return response.parse()
+            current = runCatching { URL(current, location) }.getOrNull() ?: return response.parse()
+        }
+        error("Too many redirects")
     }
 
     // Pure: drop boilerplate, prefer article/main, convert HTML to clean Markdown.
@@ -468,10 +532,13 @@ class WebSearchTool {
         const val ACTION_SEARCH = "web_search"
         const val ACTION_FETCH = "web_fetch"
         private const val SEARCH_URL = "https://html.duckduckgo.com/html/"
+        private const val SEARCH_LITE_URL = "https://lite.duckduckgo.com/lite/"
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         private const val HTTP_TIMEOUT_MS = 20_000
         private const val MAX_BODY_BYTES = 2 * 1024 * 1024
+        private const val MAX_REDIRECTS = 5
+        private const val MAX_SNIPPET_CHARS = 300
         private const val RESULTS_PER_PAGE = 30
         private const val MAX_PAGES = 3
         private const val DEFAULT_LIMIT = 5
@@ -480,6 +547,7 @@ class WebSearchTool {
         private const val MIN_MAX_CHARS = 500
         private const val MAX_MAX_CHARS = 20_000
         private const val MAX_TOOL_RESULT_CHARS = 8 * 1024
+        private val WHITESPACE_RE = Regex("\\s+")
         private val TOOL_TAG_REGEX = Regex(
             """<\s*tool[_ -]?call\s*>(.*?)<\s*/\s*tool[_ -]?call\s*>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
