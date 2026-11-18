@@ -149,7 +149,7 @@ static llama_context *init_context(llama_model *model, const int n_ctx = 0) {
     ctx_params.moe_cache_size = g_moe_cpu_experts ? g_moe_cache_size : 0;
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
-        LOGe("%s: llama_new_context_with_model() returned null)", __func__);
+        LOGe("%s: llama_init_from_model() returned null)", __func__);
     }
     return context;
 }
