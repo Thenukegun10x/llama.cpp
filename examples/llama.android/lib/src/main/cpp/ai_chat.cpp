@@ -880,8 +880,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_nativeHasToolSupport(
 ) {
     if (!g_chat_templates) return JNI_FALSE;
     const auto caps = common_chat_templates_get_caps(g_chat_templates.get());
-    const auto it = caps.find("supports_tools");
-    return (it != caps.end() && it->second) ? JNI_TRUE : JNI_FALSE;
+    // Upstream replaced the nlohmann-style find()/end() API with contains()/at().
+    return (caps.contains("supports_tools") && caps.at("supports_tools").get<bool>())
+               ? JNI_TRUE
+               : JNI_FALSE;
 }
 
 extern "C"
